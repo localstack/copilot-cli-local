@@ -1,5 +1,5 @@
 ##  <img align="left" alt="AWS Copilot CLI" src="./site/content/assets/images/copilot-logo-48-light.svg" width="85" /> AWS Copilot CLI
-###### _Build, Release and Operate Containerized Applications on AWS._ 
+###### _Build, Release and Operate Containerized Applications on AWS._
 
 ![latest version](https://img.shields.io/github/v/release/aws/copilot-cli)
 [![Join the chat at https://gitter.im/aws/copilot-cli](https://badges.gitter.im/aws/copilot-cli.svg)](https://gitter.im/aws/copilot-cli?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
@@ -62,9 +62,9 @@ $ copilot init --app demo                \
 This will create a VPC, Application Load Balancer, an Amazon ECS Service with the sample app running on AWS Fargate.
 This process will take around 8 minutes to complete - at which point you'll get a URL for your sample app running! 🚀
 
-## Learning more 
+## Learning more
 
-Want to learn more about what's happening? Check out our documentation [https://aws.github.io/copilot-cli/](https://aws.github.io/copilot-cli/) for a getting started guide, learning about Copilot concepts, and a breakdown of our commands. 
+Want to learn more about what's happening? Check out our documentation [https://aws.github.io/copilot-cli/](https://aws.github.io/copilot-cli/) for a getting started guide, learning about Copilot concepts, and a breakdown of our commands.
 
 ## Feedback
 

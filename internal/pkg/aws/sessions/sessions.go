@@ -7,6 +7,7 @@ package sessions
 import (
 	"context"
 	"fmt"
+	"github.com/aws/copilot-cli/internal/pkg/endpoints"
 	"net/http"
 	"runtime"
 	"sync"
@@ -210,7 +211,8 @@ func newConfig() *aws.Config {
 	return aws.NewConfig().
 		WithHTTPClient(c).
 		WithCredentialsChainVerboseErrors(true).
-		WithMaxRetries(maxRetriesOnRecoverableFailures)
+		WithMaxRetries(maxRetriesOnRecoverableFailures).
+		WithEndpointResolver(endpoints.NewResolver())
 }
 
 // userAgentHandler returns a http request handler that sets the AWS Copilot custom user agent to all aws requests.

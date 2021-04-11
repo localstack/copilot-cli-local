@@ -14,7 +14,7 @@ func getLocalStackUrl() string {
 	hostname := os.Getenv("LOCALSTACK_HOSTNAME")
 
 	if hostname == "" {
-		hostname = "localhost"
+		hostname = "localhost.localstack.cloud"
 	}
 
 	port := os.Getenv("EDGE_PORT")

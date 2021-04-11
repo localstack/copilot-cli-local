@@ -40,7 +40,8 @@ func main() {
 func buildRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "copilot",
-		Short: shortDescription,
+		// Short: shortDescription,
+		Short: "Copilot CLI",
 		Example: `
   Displays the help menu for the "init" command.
   /code $ copilot init --help`,

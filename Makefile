@@ -33,6 +33,12 @@ build-regression: package-custom-resources compile-linux package-custom-resource
 
 .PHONY: release
 release: package-custom-resources compile-darwin compile-linux compile-windows package-custom-resources-clean
+	# Note: assumption is that the code below is run from a MacOS machine...
+	mkdir -p build/macos-darwin build/linux-arm64 build/linux-amd64 build/windows
+	mv bin/local/copilot build/macos-darwin/copilotlocal
+	mv bin/local/copilot-linux-arm64 build/linux-arm64/copilotlocal
+	mv bin/local/copilot-linux-amd64 build/linux-amd64/copilotlocal
+	mv bin/local/copilot.exe build/windows/copilotlocal.exe
 
 .PHONY: release-docker
 release-docker:

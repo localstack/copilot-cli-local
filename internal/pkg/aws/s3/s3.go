@@ -145,6 +145,7 @@ func (s *S3) EmptyBucket(bucket string) error {
 func ParseURL(url string) (bucket string, key string, err error) {
 	if strings.HasPrefix(url, s3URIPrefix) {
 		return parseS3URI(url)
+	}
 	trimmed := strings.TrimPrefix(strings.TrimPrefix(url, "http://"), "https://")
 	parsedURL := strings.SplitN(trimmed, "/", 2)
 	if len(parsedURL) != 2 {

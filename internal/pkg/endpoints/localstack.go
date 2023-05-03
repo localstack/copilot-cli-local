@@ -10,11 +10,15 @@ type localStackResolver struct {
 	defaultResolver endpoints.Resolver
 }
 
-func getLocalStackUrl() string {
+func getLocalStackUrl(service string) string {
 	hostname := os.Getenv("LOCALSTACK_HOSTNAME")
 
 	if hostname == "" {
 		hostname = "localhost.localstack.cloud"
+	}
+
+	if service == "s3" {
+		hostname = "s3.localhost.localstack.cloud"
 	}
 
 	port := os.Getenv("EDGE_PORT")
@@ -28,7 +32,7 @@ func getLocalStackUrl() string {
 		disableSSL = false
 	}
 
-	return endpoints.AddScheme(hostname + ":" + port, disableSSL)
+	return endpoints.AddScheme(hostname+":"+port, disableSSL)
 }
 
 func (l *localStackResolver) EndpointFor(service, region string, opts ...func(*endpoints.Options)) (endpoints.ResolvedEndpoint, error) {
@@ -38,7 +42,7 @@ func (l *localStackResolver) EndpointFor(service, region string, opts ...func(*e
 		return endpointFor, err
 	}
 
-	endpointFor.URL = getLocalStackUrl()
+	endpointFor.URL = getLocalStackUrl(service)
 
 	return endpointFor, err
 }

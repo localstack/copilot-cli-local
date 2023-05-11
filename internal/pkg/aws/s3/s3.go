@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -255,7 +256,14 @@ func parseS3URI(uri string) (bucket, key string, err error) {
 //
 // [virtual-hosted-style access URL]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-bucket-intro.html#virtual-host-style-url-ex
 func parseHTTPURI(url string) (bucket, key string, err error) {
-	parsedURL := strings.SplitN(strings.TrimPrefix(url, "https://"), "/", 2)
+	httpTrimRegex := regexp.MustCompile(`^https?://`) // handle http+https case
+
+	trimmedURL := httpTrimRegex.ReplaceAllString(url, "")
+	parsedURL := strings.SplitN(trimmedURL, "/", 2)
+
+	if len(parsedURL) != 2 {
+		return "", "", fmt.Errorf("cannot parse S3 URL %s into bucket name and key", url)
+	}
 
 	// go through the host backwards and find the first piece that
 	// starts with 's3' - the rest of the host (to the left of 's3')

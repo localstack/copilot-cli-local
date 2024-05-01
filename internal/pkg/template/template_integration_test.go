@@ -36,6 +36,7 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				},
 				CustomResources: customResources,
 				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders with timeout and no retries": {
@@ -50,6 +51,7 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				ServiceDiscoveryEndpoint: "test.app.local",
 				CustomResources:          customResources,
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders with options": {
@@ -65,6 +67,7 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				ServiceDiscoveryEndpoint: "test.app.local",
 				CustomResources:          customResources,
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders with options and addons": {
@@ -85,6 +88,7 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				ServiceDiscoveryEndpoint: "test.app.local",
 				CustomResources:          customResources,
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders with Windows platform": {
@@ -100,6 +104,7 @@ func TestTemplate_ParseScheduledJob(t *testing.T) {
 				ServiceDiscoveryEndpoint: "test.app.local",
 				CustomResources:          customResources,
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 	}
@@ -148,6 +153,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -164,6 +170,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:      true,
 				CustomResources: customResources,
 				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid grpc template by default": {
@@ -171,6 +178,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -187,6 +195,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:      true,
 				CustomResources: customResources,
 				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with addons with no outputs": {
@@ -194,6 +203,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -213,6 +223,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:               true,
 				CustomResources:          customResources,
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders a valid template with addons with outputs": {
@@ -220,6 +231,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -242,6 +254,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:               true,
 				CustomResources:          customResources,
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders a valid template with private subnet placement": {
@@ -249,6 +262,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -265,6 +279,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:               true,
 				CustomResources:          customResources,
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 		"renders a valid template with all storage options": {
@@ -272,6 +287,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -290,7 +306,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 					EFSPerms: []*template.EFSPermission{
 						{
 							AccessPointID: aws.String("ap-1234"),
-							FilesystemID:  aws.String("fs-5678"),
+							FilesystemID:  template.PlainFileSystemID("fs-5678"),
 							Write:         true,
 						},
 					},
@@ -305,7 +321,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 						{
 							EFS: &template.EFSVolumeConfiguration{
 								AccessPointID: aws.String("ap-1234"),
-								Filesystem:    aws.String("fs-5678"),
+								Filesystem:    template.PlainFileSystemID("fs-5678"),
 								IAM:           aws.String("ENABLED"),
 								RootDirectory: aws.String("/"),
 							},
@@ -316,6 +332,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:      true,
 				CustomResources: customResources,
 				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with minimal storage options": {
@@ -323,6 +340,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -339,7 +357,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				Storage: &template.StorageOpts{
 					EFSPerms: []*template.EFSPermission{
 						{
-							FilesystemID: aws.String("fs-5678"),
+							FilesystemID: template.PlainFileSystemID("fs-5678"),
 						},
 					},
 					MountPoints: []*template.MountPoint{
@@ -353,7 +371,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 						{
 							Name: aws.String("efs"),
 							EFS: &template.EFSVolumeConfiguration{
-								Filesystem:    aws.String("fs-5678"),
+								Filesystem:    template.PlainFileSystemID("fs-5678"),
 								RootDirectory: aws.String("/"),
 							},
 						},
@@ -362,6 +380,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:      true,
 				CustomResources: customResources,
 				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with ephemeral storage": {
@@ -369,6 +388,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -388,6 +408,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:      true,
 				CustomResources: customResources,
 				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with entrypoint and command overrides": {
@@ -395,6 +416,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -413,6 +435,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBEnabled:      true,
 				CustomResources: customResources,
 				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with additional addons parameters": {
@@ -421,6 +444,7 @@ func TestTemplate_ParseLoadBalancedWebService(t *testing.T) {
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -440,6 +464,7 @@ DiscoveryServiceArn:
 				ALBEnabled:      true,
 				CustomResources: customResources,
 				EnvVersion:      "v1.42.0",
+				Version:         "v1.28.0",
 			},
 		},
 		"renders a valid template with Windows platform": {
@@ -447,6 +472,7 @@ DiscoveryServiceArn:
 				ALBListener: &template.ALBListener{
 					Rules: []template.ALBListenerRule{
 						{
+							Path:            "/",
 							TargetPort:      "8080",
 							TargetContainer: "main",
 							HTTPVersion:     "GRPC",
@@ -467,6 +493,7 @@ DiscoveryServiceArn:
 				ALBEnabled:               true,
 				CustomResources:          customResources,
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.28.0",
 			},
 		},
 	}

@@ -43,11 +43,6 @@ $ copilot storage init -n my-cluster -t Aurora -w api -l workload --engine Postg
 ```
 This will create an RDS Aurora Serverless v2 cluster that uses PostgreSQL engine with a database named `my_db`. An environment variable named `MYCLUSTER_SECRET` is injected into your workload as a JSON string. The fields are `'host'`, `'port'`, `'dbname'`, `'username'`, `'password'`, `'dbClusterIdentifier'` and `'engine'`.
 
-To create an [RDS Aurora Serverless v1](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless.html) cluster, you can run
-```console
-$ copilot storage init -n my-cluster -t Aurora --serverless-version v1
-```
-
 ### Environment storage
 
 The `-l` flag is short for `--lifecycle`. In the examples above, the value to the `-l` flag is `workload`.
@@ -77,9 +72,7 @@ storage:
       read_only: false
 ```
 
-This manifest will result in an EFS volume being created at the environment level, with an Access Point and dedicated directory at the path `/frontend` in the EFS filesystem created specifically for your service. Your container will be able to access this directory and all its subdirectories at the `/var/efs` path in its own filesystem. The `/frontend` directory and EFS filesystem will persist until you delete your environment. 
-
-The use of an access point for each service ensures that no two services can access each other's data unless you specifically intend for them to do so by specifying the full advanced configuration. You can read more in [Advanced Use Cases](#advanced-use-cases).
+This manifest will result in an EFS volume being created at the environment level, with an Access Point and dedicated directory at the path `/frontend` in the EFS filesystem created specifically for your service. Your container will be able to access this directory and all its subdirectories at the `/var/efs` path in its own filesystem. The `/frontend` directory and EFS filesystem will persist until you delete your environment. The use of an access point for each service ensures that no two services can access each other's data.
 
 You can also customize the UID and GID used for the access point by specifying the `uid` and `gid` fields in advanced EFS configuration. If you do not specify a UID or GID, Copilot picks a pseudorandom UID and GID for the access point based on the [CRC32 checksum](https://stackoverflow.com/a/14210379/5890422) of the service's name. 
 
@@ -126,8 +119,11 @@ This may not be suitable for workloads which depend on the correct data being pr
 ###### Using `copilot svc exec`
 For workloads where data must be present prior to your task containers coming up, we recommend using a placeholder container first. 
 
-For example, deploy your service with the following values in the manifest:
+For example, deploy your `frontend` service with the following values in the manifest:
 ```yaml
+name: frontend
+type: Load Balanced Web Service
+
 image:
   location: amazon/amazon-ecs-sample
 exec: true
@@ -152,6 +148,9 @@ This will open an interactive shell from which you can add packages like `curl` 
 When you have populated the directory, modify your manifest to remove the `exec` directive and update the `build` field to your desired Docker build config or image location.
 
 ```yaml
+name: frontend
+type: Load Balanced Web Service
+
 image:
   build: ./Dockerfile
 storage:

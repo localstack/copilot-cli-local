@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	clusterStatusActive              = "ACTIVE"
+	statusActive                     = "ACTIVE"
 	waitServiceStablePollingInterval = 15 * time.Second
 	waitServiceStableMaxTry          = 80
 	stableServiceDeploymentNum       = 1
@@ -39,6 +39,7 @@ type api interface {
 	StopTask(input *ecs.StopTaskInput) (*ecs.StopTaskOutput, error)
 	UpdateService(input *ecs.UpdateServiceInput) (*ecs.UpdateServiceOutput, error)
 	WaitUntilTasksRunning(input *ecs.DescribeTasksInput) error
+	ListServicesByNamespacePages(input *ecs.ListServicesByNamespaceInput, fn func(*ecs.ListServicesByNamespaceOutput, bool) bool) error
 }
 
 type ssmSessionStarter interface {
@@ -100,20 +101,60 @@ func (e *ECS) TaskDefinition(taskDefName string) (*TaskDefinition, error) {
 
 // Service calls ECS API and returns the specified service running in the cluster.
 func (e *ECS) Service(clusterName, serviceName string) (*Service, error) {
-	resp, err := e.client.DescribeServices(&ecs.DescribeServicesInput{
-		Cluster:  aws.String(clusterName),
-		Services: aws.StringSlice([]string{serviceName}),
-	})
+	svcs, err := e.Services(clusterName, serviceName)
 	if err != nil {
-		return nil, fmt.Errorf("describe service %s: %w", serviceName, err)
+		return nil, err
 	}
-	for _, service := range resp.Services {
-		if aws.StringValue(service.ServiceName) == serviceName {
-			svc := Service(*service)
-			return &svc, nil
+	if aws.StringValue(svcs[0].ServiceName) != serviceName {
+		return nil, fmt.Errorf("cannot find service %s", serviceName)
+	}
+
+	return svcs[0], nil
+}
+
+// Services calls the ECS API and returns all of the specified services running in cluster.
+func (e *ECS) Services(cluster string, services ...string) ([]*Service, error) {
+	var svcs []*Service
+
+	for i := 0; i < len(services); i += 10 {
+		split := services[i:min(10+i, len(services))]
+
+		resp, err := e.client.DescribeServices(&ecs.DescribeServicesInput{
+			Cluster:  aws.String(cluster),
+			Services: aws.StringSlice(split),
+		})
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("describe services: %w", err)
+		case len(resp.Failures) > 0:
+			return nil, fmt.Errorf("describe services: %s", resp.Failures[0].String())
+		case len(resp.Services) != len(split):
+			return nil, fmt.Errorf("describe services: got %v services, but expected %v", len(resp.Services), len(split))
+		}
+
+		for j := range resp.Services {
+			svc := Service(*resp.Services[j])
+			svcs = append(svcs, &svc)
 		}
 	}
-	return nil, fmt.Errorf("cannot find service %s", serviceName)
+
+	return svcs, nil
+}
+
+// ListServicesByNamespace returns a list of service ARNs of services that
+// are in the given namespace.
+func (e *ECS) ListServicesByNamespace(namespace string) ([]string, error) {
+	var arns []string
+	err := e.client.ListServicesByNamespacePages(&ecs.ListServicesByNamespaceInput{
+		Namespace: aws.String(namespace),
+	}, func(resp *ecs.ListServicesByNamespaceOutput, b bool) bool {
+		arns = append(arns, aws.StringValueSlice(resp.ServiceArns)...)
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return arns, nil
 }
 
 // UpdateServiceOpts sets the optional parameter for UpdateService.
@@ -301,7 +342,7 @@ func (e *ECS) DefaultCluster() (string, error) {
 
 	// NOTE: right now at most 1 default cluster is possible, so cluster[0] must be the default cluster
 	cluster := resp.Clusters[0]
-	if aws.StringValue(cluster.Status) != clusterStatusActive {
+	if aws.StringValue(cluster.Status) != statusActive {
 		return "", ErrNoDefaultCluster
 	}
 
@@ -317,6 +358,56 @@ func (e *ECS) HasDefaultCluster() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// ActiveClusters returns the subset of cluster arns that have an ACTIVE status.
+func (e *ECS) ActiveClusters(arns ...string) ([]string, error) {
+	resp, err := e.client.DescribeClusters(&ecs.DescribeClustersInput{
+		Clusters: aws.StringSlice(arns),
+	})
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("describe clusters: %w", err)
+	case len(resp.Failures) > 0:
+		return nil, fmt.Errorf("describe clusters: %s", resp.Failures[0].GoString())
+	}
+
+	var active []string
+	for _, cluster := range resp.Clusters {
+		if aws.StringValue(cluster.Status) == statusActive {
+			active = append(active, aws.StringValue(cluster.ClusterArn))
+		}
+	}
+
+	return active, nil
+}
+
+// ActiveServices returns the subset of service arns that have an ACTIVE status from the given cluster.
+func (e *ECS) ActiveServices(clusterARN string, serviceARNs ...string) ([]string, error) {
+	// All the filteredSvcARNs will belong to the given Cluster.
+	filteredSvcARNS, err := e.filterServiceARNs(clusterARN, serviceARNs...)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := e.client.DescribeServices(&ecs.DescribeServicesInput{
+		Cluster:  aws.String(clusterARN),
+		Services: aws.StringSlice(filteredSvcARNS),
+	})
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("describe services: %w", err)
+	case len(resp.Failures) > 0:
+		return nil, fmt.Errorf("describe services: %s", resp.Failures[0].GoString())
+	}
+
+	var active []string
+	for _, svc := range resp.Services {
+		if aws.StringValue(svc.Status) == statusActive {
+			active = append(active, aws.StringValue(svc.ServiceArn))
+		}
+	}
+
+	return active, nil
 }
 
 // RunTask runs a number of tasks with the task definition and network configurations in a cluster, and returns after
@@ -442,6 +533,21 @@ func (e *ECS) service(clusterName, serviceName string) (*Service, error) {
 		}
 	}
 	return nil, fmt.Errorf("cannot find service %s", serviceName)
+}
+
+// filterServiceARNs returns subset of the ServiceARNs that belong to the given Cluster.
+func (e *ECS) filterServiceARNs(clusterARN string, serviceARNs ...string) ([]string, error) {
+	var filtered []string
+	for _, arn := range serviceARNs {
+		svcArn, err := ParseServiceArn(arn)
+		if err != nil {
+			return nil, err
+		}
+		if svcArn.ClusterArn() == clusterARN {
+			filtered = append(filtered, arn)
+		}
+	}
+	return filtered, nil
 }
 
 func isRequestTimeoutErr(err error) bool {

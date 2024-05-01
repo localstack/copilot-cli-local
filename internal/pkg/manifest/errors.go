@@ -5,11 +5,12 @@ package manifest
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/aws/copilot-cli/internal/pkg/aws/cloudfront"
 	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/dustin/go-humanize/english"
-	"strconv"
-	"strings"
 )
 
 // ErrInvalidWorkloadType occurs when a user requested a manifest template type that doesn't exist.
@@ -234,4 +235,27 @@ type errContainersExposingSamePort struct {
 
 func (e *errContainersExposingSamePort) Error() string {
 	return fmt.Sprintf(`containers %q and %q are exposing the same port %d`, e.firstContainer, e.secondContainer, e.port)
+}
+
+type errContainerPortExposedWithMultipleProtocol struct {
+	container      string
+	port           uint16
+	firstProtocol  string
+	secondProtocol string
+}
+
+func (e *errContainerPortExposedWithMultipleProtocol) Error() string {
+	return fmt.Sprintf(`container %q is exposing the same port %d with protocol %s and %s`, e.container, e.port, e.firstProtocol, e.secondProtocol)
+}
+
+type errHealthCheckPortExposedWithInvalidProtocol struct {
+	healthCheckPort uint16
+	container       string
+	protocol        string
+}
+
+func (e *errHealthCheckPortExposedWithInvalidProtocol) Error() string {
+	return fmt.Sprintf(`container %q exposes port %d using protocol %s invalid for health checks. Valid protocol %s %s.`, 
+		e.container, e.healthCheckPort, e.protocol, english.PluralWord(len(validHealthCheckProtocols), "is", "are"), 
+		english.WordSeries(quoteStringSlice(validHealthCheckProtocols), "or"))
 }

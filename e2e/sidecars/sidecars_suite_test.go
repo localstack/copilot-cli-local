@@ -22,8 +22,7 @@ var docker *client.Docker
 var appName string
 var envName string
 var svcName string
-var sidecarImageURI string
-var sidecarRepoName string
+var mainRepoName string
 
 // The Sidecars suite runs creates a new service with sidecar containers.
 func TestSidecars(t *testing.T) {
@@ -40,14 +39,14 @@ var _ = BeforeSuite(func() {
 	appName = fmt.Sprintf("e2e-sidecars-%d", time.Now().Unix())
 	envName = "test"
 	svcName = "hello"
-	sidecarRepoName = fmt.Sprintf("e2e-sidecars-nginx-%d", time.Now().Unix())
+	mainRepoName = fmt.Sprintf("e2e-sidecars-main-%d", time.Now().Unix())
 })
 
 var _ = AfterSuite(func() {
-	_, err := cli.AppDelete()
-	Expect(err).NotTo(HaveOccurred())
-	err = command.Run("aws", []string{"ecr", "delete-repository", "--repository-name", sidecarRepoName, "--force"})
-	Expect(err).NotTo(HaveOccurred())
+	_, appDeleteErr := cli.AppDelete()
+	repoDeleteErr := command.Run("aws", []string{"ecr", "delete-repository", "--repository-name", mainRepoName, "--force"})
+	Expect(appDeleteErr).NotTo(HaveOccurred())
+	Expect(repoDeleteErr).NotTo(HaveOccurred())
 })
 
 // exponentialBackoffWithJitter backoff exponentially with jitter based on 200ms base

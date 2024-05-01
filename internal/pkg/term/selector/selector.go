@@ -8,7 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
+
+	"github.com/dustin/go-humanize/english"
 
 	awsecs "github.com/aws/copilot-cli/internal/pkg/aws/ecs"
 	"github.com/aws/copilot-cli/internal/pkg/config"
@@ -23,6 +24,7 @@ import (
 const (
 	svcWorkloadType = "service"
 	jobWorkloadType = "job"
+	anyWorkloadType = "workload"
 
 	every         = "@every %s"
 	rate          = "Rate"
@@ -73,6 +75,7 @@ const (
 	jobNameFinalMsg      = "Job name:"
 	deployedJobFinalMsg  = "Job:"
 	deployedSvcFinalMsg  = "Service:"
+	deployedWkldFinalMsg = "Workload:"
 	taskFinalMsg         = "Task:"
 	workloadFinalMsg     = "Name:"
 	dockerfileFinalMsg   = "Dockerfile:"
@@ -153,8 +156,10 @@ type workspaceRetriever interface {
 type deployedWorkloadsRetriever interface {
 	ListDeployedServices(appName string, envName string) ([]string, error)
 	ListDeployedJobs(appName, envName string) ([]string, error)
+	ListDeployedWorkloads(appName, envName string) ([]string, error)
 	IsServiceDeployed(appName string, envName string, svcName string) (bool, error)
 	IsJobDeployed(appName, envName, jobName string) (bool, error)
+	IsWorkloadDeployed(appName, envName, wkldName string) (bool, error)
 	ListSNSTopics(appName string, envName string) ([]deploy.Topic, error)
 }
 
@@ -186,6 +191,9 @@ type ConfigSelector struct {
 type LocalWorkloadSelector struct {
 	*ConfigSelector
 	ws workspaceRetriever
+
+	// Option, turned on by passing WithOnlyInitialized to NewLocalWorkloadSelector.
+	onlyInitializedWorkloads bool
 }
 
 // LocalEnvironmentSelector is an application and environment selector, but can also choose an environment from the workspace.
@@ -196,6 +204,7 @@ type LocalEnvironmentSelector struct {
 
 // WorkspaceSelector selects from local workspace.
 type WorkspaceSelector struct {
+	*ConfigSelector
 	prompt Prompter
 	ws     workspaceRetriever
 }
@@ -291,11 +300,15 @@ func NewConfigSelector(prompt Prompter, store configLister) *ConfigSelector {
 
 // NewLocalWorkloadSelector returns a new selector that chooses applications and environments from the config store, but
 // services from the local workspace.
-func NewLocalWorkloadSelector(prompt Prompter, store configLister, ws workspaceRetriever) *LocalWorkloadSelector {
-	return &LocalWorkloadSelector{
+func NewLocalWorkloadSelector(prompt Prompter, store configLister, ws workspaceRetriever, options ...WorkloadSelectOption) *LocalWorkloadSelector {
+	s := &LocalWorkloadSelector{
 		ConfigSelector: NewConfigSelector(prompt, store),
 		ws:             ws,
 	}
+	for _, opt := range options {
+		opt(s)
+	}
+	return s
 }
 
 // NewLocalEnvironmentSelector returns a new selector that chooses applications from the config store, but an environment
@@ -591,6 +604,20 @@ func (s *DeploySelector) DeployedService(msg, help string, app string, opts ...G
 	}, nil
 }
 
+// DeployedWorkload has the user select a deployed workload. Callers can provide either a particular environment,
+// a particular workload to filter on, or both.
+func (s *DeploySelector) DeployedWorkload(msg, help string, app string, opts ...GetDeployedWorkloadOpts) (*DeployedWorkload, error) {
+	wkld, err := s.deployedWorkload(anyWorkloadType, msg, help, app, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &DeployedWorkload{
+		Name: wkld.Name,
+		Env:  wkld.Env,
+		Type: wkld.Type,
+	}, nil
+}
+
 func (s *DeploySelector) deployedWorkload(workloadType string, msg, help string, app string, opts ...GetDeployedWorkloadOpts) (*DeployedWorkload, error) {
 	for _, opt := range opts {
 		opt(s)
@@ -608,8 +635,13 @@ func (s *DeploySelector) deployedWorkload(workloadType string, msg, help string,
 		isWorkloadDeployed = s.deployStoreSvc.IsJobDeployed
 		listDeployedWorkloads = s.deployStoreSvc.ListDeployedJobs
 		finalMessage = deployedJobFinalMsg
+	case anyWorkloadType:
+		isWorkloadDeployed = s.deployStoreSvc.IsWorkloadDeployed
+		listDeployedWorkloads = s.deployStoreSvc.ListDeployedWorkloads
+		finalMessage = deployedWkldFinalMsg
 	default:
 		return nil, fmt.Errorf("unrecognized workload type %s", workloadType)
+
 	}
 
 	var err error
@@ -673,11 +705,13 @@ func (s *DeploySelector) deployedWorkload(workloadType string, msg, help string,
 	var deployedWkld *DeployedWorkload
 	if len(wkldEnvs) == 1 {
 		deployedWkld = wkldEnvs[0]
-		if s.name == "" && s.env == "" {
+		switch {
+		case s.name == "" && s.env == "":
 			log.Infof("Found only one deployed %s %s in environment %s\n", workloadType, color.HighlightUserInput(deployedWkld.Name), color.HighlightUserInput(deployedWkld.Env))
-		}
-		if (s.name != "") != (s.env != "") {
-			log.Infof("%s %s found in environment %s\n", strings.ToTitle(workloadType), color.HighlightUserInput(deployedWkld.Name), color.HighlightUserInput(deployedWkld.Env))
+		case s.name != "" && s.env == "":
+			log.Infof("%s found only in environment %s\n", color.HighlightUserInput(deployedWkld.Name), color.HighlightUserInput(deployedWkld.Env))
+		case s.name == "" && s.env != "":
+			log.Infof("Only the %s %s is found in the environment %s\n", deployedWkld.Type, color.HighlightUserInput(deployedWkld.Name), color.HighlightUserInput(deployedWkld.Env))
 		}
 		return deployedWkld, nil
 	}
@@ -696,7 +730,7 @@ func (s *DeploySelector) deployedWorkload(workloadType string, msg, help string,
 		prompt.WithFinalMessage(finalMessage),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("select deployed %ss for application %s: %w", workloadType, app, err)
+		return nil, err
 	}
 	deployedWkld = wkldEnvNameMap[wkldEnvName]
 
@@ -717,95 +751,164 @@ func (s *DeploySelector) filterWorkloads(inWorkloads []*DeployedWorkload) ([]*De
 
 // Service fetches all services in the workspace and then prompts the user to select one.
 func (s *LocalWorkloadSelector) Service(msg, help string) (string, error) {
-	summary, err := s.ws.Summary()
+	options, err := s.getWorkloadSelectOptions(svcWorkloadType)
 	if err != nil {
-		return "", fmt.Errorf("read workspace summary: %w", err)
-	}
-	wsServiceNames, err := s.retrieveWorkspaceServices()
-	if err != nil {
-		return "", fmt.Errorf("retrieve services from workspace: %w", err)
-	}
-	storeServiceNames, err := s.ConfigSelector.workloadLister.ListServices(summary.Application)
-	if err != nil {
-		return "", fmt.Errorf("retrieve services from store: %w", err)
-	}
-	serviceNames := filterWlsByName(storeServiceNames, wsServiceNames)
-	if len(serviceNames) == 0 {
-		return "", errors.New("no services found")
-	}
-	if len(serviceNames) == 1 {
-		log.Infof("Only found one service, defaulting to: %s\n", color.HighlightUserInput(serviceNames[0]))
-		return serviceNames[0], nil
+		return "", err
 	}
 
-	selectedServiceName, err := s.prompt.SelectOne(msg, help, serviceNames, prompt.WithFinalMessage(svcNameFinalMsg))
+	if len(options) == 1 {
+		log.Infof("Found only one service, defaulting to: %s\n", color.HighlightUserInput(options[0].Value))
+		return options[0].Value, nil
+	}
+	selectedSvcName, err := s.prompt.SelectOption(msg, help, options, prompt.WithFinalMessage(workloadFinalMsg))
 	if err != nil {
 		return "", fmt.Errorf("select service: %w", err)
 	}
-	return selectedServiceName, nil
+	return selectedSvcName, nil
 }
 
 // Job fetches all jobs in the workspace and then prompts the user to select one.
 func (s *LocalWorkloadSelector) Job(msg, help string) (string, error) {
-	summary, err := s.ws.Summary()
+	options, err := s.getWorkloadSelectOptions(jobWorkloadType)
 	if err != nil {
-		return "", fmt.Errorf("read workspace summary: %w", err)
-	}
-	wsJobNames, err := s.retrieveWorkspaceJobs()
-	if err != nil {
-		return "", fmt.Errorf("retrieve jobs from workspace: %w", err)
-	}
-	storeJobNames, err := s.ConfigSelector.workloadLister.ListJobs(summary.Application)
-	if err != nil {
-		return "", fmt.Errorf("retrieve jobs from store: %w", err)
-	}
-	jobNames := filterWlsByName(storeJobNames, wsJobNames)
-	if len(jobNames) == 0 {
-		return "", errors.New("no jobs found")
-	}
-	if len(jobNames) == 1 {
-		log.Infof("Only found one job, defaulting to: %s\n", color.HighlightUserInput(jobNames[0]))
-		return jobNames[0], nil
+		return "", err
 	}
 
-	selectedJobName, err := s.prompt.SelectOne(msg, help, jobNames, prompt.WithFinalMessage(jobNameFinalMsg))
+	if len(options) == 1 {
+		log.Infof("Found only one job, defaulting to: %s\n", color.HighlightUserInput(options[0].Value))
+		return options[0].Value, nil
+	}
+	selectedJobName, err := s.prompt.SelectOption(msg, help, options, prompt.WithFinalMessage(workloadFinalMsg))
 	if err != nil {
 		return "", fmt.Errorf("select job: %w", err)
 	}
 	return selectedJobName, nil
+
 }
 
-// Workload fetches all jobs and services in an app and prompts the user to select one.
-func (s *LocalWorkloadSelector) Workload(msg, help string) (wl string, err error) {
+func (s *LocalWorkloadSelector) getWorkloadSelectOptions(workloadType string) ([]prompt.Option, error) {
+	pluralNounString := english.PluralWord(2, workloadType, "")
+
 	summary, err := s.ws.Summary()
 	if err != nil {
-		return "", fmt.Errorf("read workspace summary: %w", err)
+		return nil, fmt.Errorf("read workspace summary: %w", err)
 	}
-	wsWlNames, err := s.retrieveWorkspaceWorkloads()
+	wsWlNames, err := s.retrieveWorkspaceWorkloads(workloadType)
 	if err != nil {
-		return "", fmt.Errorf("retrieve jobs and services from workspace: %w", err)
+		return nil, fmt.Errorf("retrieve %s from workspace: %w", pluralNounString, err)
 	}
-	storeWls, err := s.ConfigSelector.workloadLister.ListWorkloads(summary.Application)
+
+	storeWls, err := s.retrieveStoreWorkloads(summary.Application, workloadType)
 	if err != nil {
-		return "", fmt.Errorf("retrieve jobs and services from store: %w", err)
+		return nil, fmt.Errorf("retrieve %s from store: %w", pluralNounString, err)
 	}
-	wlNames := filterWlsByName(storeWls, wsWlNames)
-	if len(wlNames) == 0 {
-		return "", errors.New("no jobs or services found")
+
+	var options []prompt.Option
+
+	// Get the list of initialized workloads that are present in the workspace
+	initializedLocalWorkloads := filterWlsByName(storeWls, wsWlNames)
+	for _, wl := range initializedLocalWorkloads {
+		options = append(options, prompt.Option{Value: wl})
 	}
-	if len(wlNames) == 1 {
-		log.Infof("Only found one workload, defaulting to: %s\n", color.HighlightUserInput(wlNames[0]))
-		return wlNames[0], nil
+
+	// Return early if we're only looking for config store workloads.
+	if s.onlyInitializedWorkloads {
+		if len(initializedLocalWorkloads) == 0 {
+			return nil, fmt.Errorf("no %s found", pluralNounString)
+		}
+		return options, nil
 	}
-	selectedWlName, err := s.prompt.SelectOne(msg, help, wlNames, prompt.WithFinalMessage(workloadFinalMsg))
+
+	// If there are no local workload names, error out.
+	if len(wsWlNames) == 0 {
+		return nil, fmt.Errorf("no %s found in workspace", pluralNounString)
+	}
+	// Get the list of un-initialized workloads that are present in the workspace and add them to options.
+	unInitializedLocalWorkloads := filterOutItems(wsWlNames, initializedLocalWorkloads, func(a string) string { return a })
+	for _, wl := range unInitializedLocalWorkloads {
+		options = append(options, prompt.Option{
+			Value: wl,
+			Hint:  "uninitialized",
+		})
+	}
+	return options, nil
+}
+
+// WorkloadSelectOption represents an option for customizing LocalWorkloadSelector's behavior.
+type WorkloadSelectOption func(selector *LocalWorkloadSelector)
+
+// OnlyInitializedWorkloads modifies LocalWorkloadSelector to show only the initialized workloads in the workspace,
+// ignoring uninitialized workloads with local manifests.
+var OnlyInitializedWorkloads WorkloadSelectOption = func(s *LocalWorkloadSelector) {
+	s.onlyInitializedWorkloads = true
+}
+
+// Workloads fetches all jobs and services in a workspace and prompts the user to select one or more.
+// It can optionally select only initialized workloads which exist in the app (by passing the
+// OnlyInitializedWorkloads option to NewLocalWorkloadSelector) or list all workloads for which
+// there are manifests in the workspace (default).
+func (s *LocalWorkloadSelector) Workloads(msg, help string) ([]string, error) {
+	options, err := s.getWorkloadSelectOptions(anyWorkloadType)
+	if err != nil {
+		return nil, err
+	}
+	if len(options) == 1 {
+		log.Infof("Found only one workload, defaulting to: %s\n", color.HighlightUserInput(options[0].Value))
+		return []string{options[0].Value}, nil
+	}
+
+	selectedWlNames, err := s.prompt.MultiSelectOptions(msg, help, options, prompt.WithFinalMessage("Names:"))
+	if err != nil {
+		return nil, fmt.Errorf("select workloads: %w", err)
+	}
+	return selectedWlNames, nil
+}
+
+// Workload fetches all jobs and services in a workspace and prompts the user to select one.
+// It can optionally select only initialized workloads which exist in the app (by passing the
+// OnlyInitializedWorkloads option to NewLocalWorkloadSelector) or list all workloads for which
+// there are manifests in the workspace (default).
+func (s *LocalWorkloadSelector) Workload(msg, help string) (wl string, err error) {
+	options, err := s.getWorkloadSelectOptions(anyWorkloadType)
+	if err != nil {
+		return "", err
+	}
+	if len(options) == 1 {
+		log.Infof("Found only one workload, defaulting to: %s\n", color.HighlightUserInput(options[0].Value))
+		return options[0].Value, nil
+	}
+
+	selectedWlName, err := s.prompt.SelectOption(msg, help, options, prompt.WithFinalMessage(workloadFinalMsg))
 	if err != nil {
 		return "", fmt.Errorf("select workload: %w", err)
 	}
 	return selectedWlName, nil
 }
 
+// filterOutItems is a generic function to return the subset of allItems which does not include the items specified in
+// unwantedItems. stringFunc is a function which maps the unwantedItem type T to a string value. For example, one can
+// convert a struct of type *config.Workload to a string by passing
+//
+//	func(w *config.Workload) string { return w.Name }
+//
+// as the stringFunc parameter.
+func filterOutItems[T any](allItems []string, unwantedItems []T, stringFunc func(T) string) []string {
+	isUnwanted := make(map[string]bool)
+	for _, item := range unwantedItems {
+		isUnwanted[stringFunc(item)] = true
+	}
+	var filtered []string
+	for _, str := range allItems {
+		if isUnwanted[str] {
+			continue
+		}
+		filtered = append(filtered, str)
+	}
+	return filtered
+}
+
 // LocalEnvironment fetches all environments belong to the app in the workspace and prompts the user to select one.
-func (s *LocalEnvironmentSelector) LocalEnvironment(msg, help string) (wl string, err error) {
+func (s *LocalEnvironmentSelector) LocalEnvironment(msg, help string) (string, error) {
 	summary, err := s.ws.Summary()
 	if err != nil {
 		return "", fmt.Errorf("read workspace summary: %w", err)
@@ -823,7 +926,7 @@ func (s *LocalEnvironmentSelector) LocalEnvironment(msg, help string) (wl string
 		return "", ErrLocalEnvsNotFound
 	}
 	if len(filteredEnvNames) == 1 {
-		log.Infof("Only found one environment, defaulting to: %s\n", color.HighlightUserInput(filteredEnvNames[0]))
+		log.Infof("Found only one environment, defaulting to: %s\n", color.HighlightUserInput(filteredEnvNames[0]))
 		return filteredEnvNames[0], nil
 	}
 	selectedEnvName, err := s.prompt.SelectOne(msg, help, filteredEnvNames, prompt.WithFinalMessage(workloadFinalMsg))
@@ -834,34 +937,36 @@ func (s *LocalEnvironmentSelector) LocalEnvironment(msg, help string) (wl string
 }
 
 func filterEnvsByName(envs []*config.Environment, wantedNames []string) []string {
-	// TODO: refactor this and `filterWlsByName`  when generic supports using common struct fields: https://github.com/golang/go/issues/48522
-	isWanted := make(map[string]bool)
-	for _, name := range wantedNames {
-		isWanted[name] = true
-	}
-	var filtered []string
-	for _, wl := range envs {
-		if _, ok := isWanted[wl.Name]; !ok {
-			continue
-		}
-		filtered = append(filtered, wl.Name)
-	}
-	return filtered
+	return filterItemsByStrings(wantedNames, envs, func(e *config.Environment) string { return e.Name })
 }
 
 func filterWlsByName(wls []*config.Workload, wantedNames []string) []string {
-	isWanted := make(map[string]bool)
-	for _, name := range wantedNames {
-		isWanted[name] = true
+	return filterItemsByStrings(wantedNames, wls, func(w *config.Workload) string { return w.Name })
+}
+
+// filterItemsByStrings is a generic function to return the subset of wantedStrings that exists in possibleItems.
+// stringFunc is a method to convert the generic item type (T) to a string; for example, one can convert a struct of type
+// *config.Workload to a string by passing
+//
+//	func(w *config.Workload) string { return w.Name }.
+//
+// Likewise, filterItemsByStrings can work on a list of strings by returning the unmodified item:
+//
+//	filterItemsByStrings(wantedStrings, stringSlice2, func(s string) string { return s })
+//
+// It returns a list of strings (items whose stringFunc() exists in the list of wantedStrings).
+func filterItemsByStrings[T any](wantedStrings []string, possibleItems []T, stringFunc func(T) string) []string {
+	m := make(map[string]bool)
+	for _, item := range wantedStrings {
+		m[item] = true
 	}
-	var filtered []string
-	for _, wl := range wls {
-		if _, ok := isWanted[wl.Name]; !ok {
-			continue
+	res := make([]string, 0, len(wantedStrings))
+	for _, item := range possibleItems {
+		if m[stringFunc(item)] {
+			res = append(res, stringFunc(item))
 		}
-		filtered = append(filtered, wl.Name)
 	}
-	return filtered
+	return res
 }
 
 // WsPipeline fetches all the pipelines in a workspace and prompts the user to select one.
@@ -878,7 +983,7 @@ func (s *WsPipelineSelector) WsPipeline(msg, help string) (*workspace.PipelineMa
 		pipelineNames = append(pipelineNames, pipeline.Name)
 	}
 	if len(pipelineNames) == 1 {
-		log.Infof("Only found one pipeline; defaulting to: %s\n", color.HighlightUserInput(pipelineNames[0]))
+		log.Infof("Found only one pipeline; defaulting to: %s\n", color.HighlightUserInput(pipelineNames[0]))
 		return &workspace.PipelineManifest{
 			Name: pipelines[0].Name,
 			Path: pipelines[0].Path,
@@ -931,7 +1036,7 @@ func (s *ConfigSelector) Service(msg, help, app string) (string, error) {
 		return "", &errNoServiceInApp{appName: app}
 	}
 	if len(services) == 1 {
-		log.Infof("Only found one service, defaulting to: %s\n", color.HighlightUserInput(services[0]))
+		log.Infof("Found only one service, defaulting to: %s\n", color.HighlightUserInput(services[0]))
 		return services[0], nil
 	}
 	selectedSvcName, err := s.prompt.SelectOne(msg, help, services, prompt.WithFinalMessage(svcNameFinalMsg))
@@ -951,7 +1056,7 @@ func (s *ConfigSelector) Job(msg, help, app string) (string, error) {
 		return "", &errNoJobInApp{appName: app}
 	}
 	if len(jobs) == 1 {
-		log.Infof("Only found one job, defaulting to: %s\n", color.HighlightUserInput(jobs[0]))
+		log.Infof("Found only one job, defaulting to: %s\n", color.HighlightUserInput(jobs[0]))
 		return jobs[0], nil
 	}
 	selectedJobName, err := s.prompt.SelectOne(msg, help, jobs, prompt.WithFinalMessage(jobNameFinalMsg))
@@ -977,7 +1082,7 @@ func (s *ConfigSelector) Workload(msg, help, app string) (string, error) {
 		return "", &errNoWorkloadInApp{appName: app}
 	}
 	if len(workloads) == 1 {
-		log.Infof("Only found one workload, defaulting to: %s\n", color.HighlightUserInput(workloads[0]))
+		log.Infof("Found only one workload, defaulting to: %s\n", color.HighlightUserInput(workloads[0]))
 		return workloads[0], nil
 	}
 	selectedWorkloadName, err := s.prompt.SelectOne(msg, help, workloads, prompt.WithFinalMessage("Workload name:"))
@@ -988,25 +1093,29 @@ func (s *ConfigSelector) Workload(msg, help, app string) (string, error) {
 }
 
 // Environment fetches all the environments in an app and prompts the user to select one.
-func (s *AppEnvSelector) Environment(msg, help, app string, additionalOpts ...string) (string, error) {
+func (s *AppEnvSelector) Environment(msg, help, app string, additionalOpts ...prompt.Option) (string, error) {
 	envs, err := s.retrieveEnvironments(app)
 	if err != nil {
 		return "", fmt.Errorf("get environments for app %s from metadata store: %w", app, err)
 	}
 
-	envs = append(envs, additionalOpts...)
-	if len(envs) == 0 {
+	envOpts := make([]prompt.Option, len(envs))
+	for k := range envs {
+		envOpts[k] = prompt.Option{Value: envs[k]}
+	}
+	envOpts = append(envOpts, additionalOpts...)
+	if len(envOpts) == 0 {
 		log.Infof("Couldn't find any environments associated with app %s, try initializing one: %s\n",
 			color.HighlightUserInput(app),
 			color.HighlightCode("copilot env init"))
 		return "", fmt.Errorf("no environments found in app %s", app)
 	}
-	if len(envs) == 1 {
-		log.Infof("Only found one environment, defaulting to: %s\n", color.HighlightUserInput(envs[0]))
-		return envs[0], nil
+	if len(envOpts) == 1 {
+		log.Infof("Only found one option, defaulting to: %s\n", color.HighlightUserInput(envOpts[0].Value))
+		return envOpts[0].Value, nil
 	}
 
-	selectedEnvName, err := s.prompt.SelectOne(msg, help, envs, prompt.WithFinalMessage(envNameFinalMessage))
+	selectedEnvName, err := s.prompt.SelectOption(msg, help, envOpts, prompt.WithFinalMessage(envNameFinalMessage))
 	if err != nil {
 		return "", fmt.Errorf("select environment: %w", err)
 	}
@@ -1068,7 +1177,7 @@ func (s *AppEnvSelector) Application(msg, help string, additionalOpts ...string)
 	}
 
 	if len(appNames) == 1 {
-		log.Infof("Only found one application, defaulting to: %s\n", color.HighlightUserInput(appNames[0]))
+		log.Infof("Found only one application, defaulting to: %s\n", color.HighlightUserInput(appNames[0]))
 		return appNames[0], nil
 	}
 
@@ -1213,12 +1322,28 @@ func (s *LocalWorkloadSelector) retrieveWorkspaceJobs() ([]string, error) {
 	return localJobNames, nil
 }
 
-func (s *LocalWorkloadSelector) retrieveWorkspaceWorkloads() ([]string, error) {
-	localWlNames, err := s.ws.ListWorkloads()
-	if err != nil {
-		return nil, err
+func (s *LocalWorkloadSelector) retrieveStoreWorkloads(appName, wlType string) ([]*config.Workload, error) {
+	switch wlType {
+	case svcWorkloadType:
+		return s.ConfigSelector.workloadLister.ListServices(appName)
+	case jobWorkloadType:
+		return s.ConfigSelector.workloadLister.ListJobs(appName)
+	case anyWorkloadType:
+		return s.ConfigSelector.workloadLister.ListWorkloads(appName)
 	}
-	return localWlNames, nil
+	return nil, fmt.Errorf("unrecognized workload type %s", wlType)
+}
+
+func (s *LocalWorkloadSelector) retrieveWorkspaceWorkloads(wlType string) ([]string, error) {
+	switch wlType {
+	case svcWorkloadType:
+		return s.retrieveWorkspaceServices()
+	case jobWorkloadType:
+		return s.retrieveWorkspaceJobs()
+	case anyWorkloadType:
+		return s.ws.ListWorkloads()
+	}
+	return nil, fmt.Errorf("unrecognized workload type %s", wlType)
 }
 
 func (s *WsPipelineSelector) pipelinePath(pipelines []workspace.PipelineManifest, name string) string {

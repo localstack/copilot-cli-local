@@ -25,7 +25,7 @@ func TestScaffoldWithPatch(t *testing.T) {
 		ok, _ := afero.Exists(fs, filepath.Join(dir, "README.md"))
 		require.True(t, ok, "README.md should exist")
 
-		ok, _ = afero.Exists(fs, filepath.Join(dir, yamlPatchFile))
+		ok, _ = afero.Exists(fs, filepath.Join(dir, YAMLPatchFile))
 		require.True(t, ok, "cfn.patches.yml should exist")
 	})
 	t.Run("should return an error if the directory is not empty", func(t *testing.T) {
@@ -390,6 +390,14 @@ key: asdf
 key: asdf
 "": new`,
 		},
+		"nothing happens with empty patch file": {
+			yaml: `
+a:
+  b: value`,
+			expected: `
+a:
+  b: value`,
+		},
 		"error on invalid patch file format": {
 			overrides: `
 op: add
@@ -520,13 +528,6 @@ a:
   path: /a/c`,
 			expectedErr: `unable to apply the "remove" patch at index 1: key "/a": "c" not found in map`,
 		},
-		"error with no patches": {
-			yaml: `
-a:
-  b: value`,
-			overrides:   ``,
-			expectedErr: `no YAML patches configured`,
-		},
 		"updates the Description field of a CloudFormation template with YAML patch metrics": {
 			yaml: `
 Description: "CloudFormation template that represents a backend service on Amazon ECS."
@@ -546,7 +547,7 @@ Resources:
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			fs := afero.NewMemMapFs()
-			file, err := fs.Create("/" + yamlPatchFile)
+			file, err := fs.Create("/" + YAMLPatchFile)
 			require.NoError(t, err)
 			_, err = file.WriteString(strings.TrimSpace(tc.overrides))
 			require.NoError(t, err)

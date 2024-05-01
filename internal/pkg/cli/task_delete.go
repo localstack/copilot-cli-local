@@ -97,7 +97,7 @@ func newDeleteTaskOpts(vars deleteTaskVars) (*deleteTaskOpts, error) {
 		spinner:  termprogress.NewSpinner(log.DiagnosticWriter),
 		prompt:   prompter,
 		provider: sessProvider,
-		sel:      selector.NewLocalWorkloadSelector(prompter, store, ws),
+		sel:      selector.NewLocalWorkloadSelector(prompter, store, ws, selector.OnlyInitializedWorkloads),
 		newTaskSel: func(session *session.Session) cfTaskSelector {
 			cfn := cloudformation.New(session, cloudformation.WithProgressTracker(os.Stderr))
 			return selector.NewCFTaskSelect(prompter, store, cfn)
@@ -228,7 +228,7 @@ func (o *deleteTaskOpts) askEnvName() error {
 	if o.env != "" {
 		return nil
 	}
-	env, err := o.sel.Environment(taskDeleteEnvPrompt, "", o.app, appEnvOptionNone)
+	env, err := o.sel.Environment(taskDeleteEnvPrompt, "", o.app, prompt.Option{Value: appEnvOptionNone})
 	if err != nil {
 		return fmt.Errorf("select environment: %w", err)
 	}

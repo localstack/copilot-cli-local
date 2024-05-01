@@ -54,11 +54,22 @@ image:
   # Docker build arguments. For additional overrides: https://aws.github.io/copilot-cli/docs/manifest/backend-service/#image-build
   location: ${0accountID}.dkr.${repo-provider}.${region}.amazonaws.com/vault/${COPILOT_ENVIRONMENT_NAME}:${tag}
   port: 80
+  labels: |
+    ["label1","label2"]
+  "com.datadoghq.ad.instances": |
+    [
+      {
+        "prometheus_url": "http://metrics",
+      }
+    ]
 
 cpu: 256#${CPU}
 memory: 512    # ${Memory}
 variables:
   ${foo}: ${bar}
+network:
+  vpc:
+    security_groups: ${SECURITY_GROUPS}
 `,
 			inputEnvVar: map[string]string{
 				"0accountID":               "1234567890",
@@ -69,6 +80,7 @@ variables:
 				"CPU":                      "512",
 				"bar":                      "bar",
 				"ip":                       "10.24.34.0/23",
+				"SECURITY_GROUPS":          `["sg-1","sg-2","sg-3"]`,
 			},
 
 			wanted: `# The manifest for the ${name} service.
@@ -85,11 +97,42 @@ image:
   # Docker build arguments. For additional overrides: https://aws.github.io/copilot-cli/docs/manifest/backend-service/#image-build
   location: ${0accountID}.dkr.${repo-provider}..amazonaws.com/vault/test:latest
   port: 80
+  labels: |
+    ["label1","label2"]
+  "com.datadoghq.ad.instances": |
+    [
+      {
+        "prometheus_url": "http://metrics",
+      }
+    ]
 cpu: 256#512
 memory: 512 # ${Memory}
 variables:
   ${foo}: bar
+network:
+  vpc:
+    security_groups:
+      - sg-1
+      - sg-2
+      - sg-3
 `,
+		},
+		"should not substitute escaped dollar signs": {
+			inputStr: "echo \\${name}",
+			inputEnvVar: map[string]string{
+				"name": "this variable should not be read",
+			},
+			wanted: "echo ${name}\n",
+		},
+		"should substitute variables right after one another": {
+			inputStr: "${a}${b}\\${c}${d}",
+			inputEnvVar: map[string]string{
+				"a": "A",
+				"b": "B",
+				"c": "C",
+				"d": "D",
+			},
+			wanted: "AB${c}D\n",
 		},
 	}
 

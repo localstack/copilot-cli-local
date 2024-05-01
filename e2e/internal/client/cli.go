@@ -32,6 +32,7 @@ type AppInitRequest struct {
 type InitRequest struct {
 	AppName      string
 	WorkloadName string
+	EnvName      string
 	Deploy       bool
 	ImageTag     string
 	Dockerfile   string
@@ -161,6 +162,12 @@ type SvcDeployInput struct {
 	Force    bool
 }
 
+// DeployRequest contains parameters for calling copilot deploy --all.
+type DeployRequest struct {
+	All     bool
+	EnvName string
+}
+
 // TaskRunInput contains the parameters for calling copilot task run.
 type TaskRunInput struct {
 	AppName string
@@ -169,6 +176,7 @@ type TaskRunInput struct {
 
 	Image      string
 	Dockerfile string
+	EnvFile    string
 
 	Subnets        []string
 	SecurityGroups []string
@@ -324,6 +332,7 @@ func (cli *CLI) Init(opts *InitRequest) (string, error) {
 		exec.Command(cli.path, "init",
 			"--app", opts.AppName,
 			"--name", opts.WorkloadName,
+			"--env", opts.EnvName,
 			"--type", opts.WorkloadType,
 			"--tag", opts.ImageTag,
 			"--dockerfile", opts.Dockerfile,
@@ -478,6 +487,29 @@ func (cli *CLI) SvcDeploy(opts *SvcDeployInput) (string, error) {
 	}
 	return cli.exec(
 		exec.Command(cli.path, arguments...))
+}
+
+/*
+Deploy runs:
+copilot deploy
+
+	--env $p
+	--all
+
+It does not initialize any workloads or environments, simply deploys all initialized services
+and jobs in the workspace.
+*/
+func (cli *CLI) Deploy(opts *DeployRequest) (string, error) {
+	arguments := []string{
+		"deploy",
+		"--env", opts.EnvName,
+	}
+	if opts.All {
+		arguments = append(arguments, "--all")
+	}
+	return cli.exec(
+		exec.Command(cli.path, arguments...),
+	)
 }
 
 /*
@@ -861,6 +893,9 @@ func (cli *CLI) TaskRun(input *TaskRunInput) (string, error) {
 	commands := []string{"task", "run", "-n", input.GroupName, "--dockerfile", input.Dockerfile}
 	if input.Image != "" {
 		commands = append(commands, "--image", input.Image)
+	}
+	if input.EnvFile != "" {
+		commands = append(commands, "--env-file", input.EnvFile)
 	}
 	if input.AppName != "" {
 		commands = append(commands, "--app", input.AppName)

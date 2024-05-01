@@ -4,6 +4,8 @@
 package manifest
 
 import (
+	"maps"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/template"
@@ -131,6 +133,11 @@ func (s *ScheduledJob) requiredEnvironmentFeatures() []string {
 	return features
 }
 
+// Dockerfile returns the relative path of the Dockerfile in the manifest.
+func (j *ScheduledJob) Dockerfile() string {
+	return j.ImageConfig.Image.dockerfilePath()
+}
+
 // Publish returns the list of topics where notifications can be published.
 func (j *ScheduledJob) Publish() []Topic {
 	return j.ScheduledJobConfig.PublishConfig.publishedTopics()
@@ -155,6 +162,12 @@ func (j *ScheduledJob) BuildArgs(contextDir string) (map[string]*DockerBuildArgs
 // and the values are either env file paths or empty strings.
 func (j *ScheduledJob) EnvFiles() map[string]string {
 	return envFiles(j.Name, j.TaskConfig, j.Logging, j.Sidecars)
+}
+
+// ContainerDependencies returns a map of ContainerDependency objects for ScheduledJob
+// including dependencies for its main container, any logging sidecar, and additional sidecars.
+func (s *ScheduledJob) ContainerDependencies() map[string]ContainerDependency {
+	return containerDependencies(aws.StringValue(s.Name), s.ImageConfig.Image, s.Logging, s.Sidecars)
 }
 
 // newDefaultScheduledJob returns an empty ScheduledJob with only the default values set.
@@ -189,15 +202,15 @@ func newDefaultScheduledJob() *ScheduledJob {
 
 // ExposedPorts returns all the ports that are sidecar container ports available to receive traffic.
 func (j *ScheduledJob) ExposedPorts() (ExposedPortsIndex, error) {
-	var exposedPorts []ExposedPort
+	exposedPorts := make(map[uint16]ExposedPort)
 	for name, sidecar := range j.Sidecars {
-		out, err := sidecar.exposedPorts(name)
+		newExposedPorts, err := sidecar.exposePorts(exposedPorts, name)
 		if err != nil {
 			return ExposedPortsIndex{}, err
 		}
-		exposedPorts = append(exposedPorts, out...)
+		maps.Copy(exposedPorts, newExposedPorts)
 	}
-	portsForContainer, containerForPort := prepareParsedExposedPortsMap(sortExposedPorts(exposedPorts))
+	portsForContainer, containerForPort := prepareParsedExposedPortsMap(exposedPorts)
 	return ExposedPortsIndex{
 		PortsForContainer: portsForContainer,
 		ContainerForPort:  containerForPort,

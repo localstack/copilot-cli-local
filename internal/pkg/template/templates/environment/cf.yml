@@ -60,13 +60,14 @@ Conditions:
   ManagedAliases: !And
     - !Condition DelegateDNS
     - !Not [!Equals [ !Ref Aliases, "" ]]
+    - !Condition CreateALB
 {{- if .PublicHTTPConfig.ELBAccessLogs.ShouldCreateBucket }}
 {{ include "mappings-regional-configs" . }}
 {{- end }}
 Resources:
 {{include "bootstrap-resources" . | indent 2}}
 {{- if .PublicHTTPConfig.ELBAccessLogs.ShouldCreateBucket }}
-{{include "elb-access-logs" .PublicHTTPConfig.ELBAccessLogs | indent 2}}
+{{include "elb-access-logs" . | indent 2}}
 {{- end}}
 {{- if .CDNConfig}}
 {{include "cdn-resources" . | indent 2}}
@@ -305,8 +306,8 @@ Resources:
     {{- end}}
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      {{- if .PublicHTTPConfig.ELBAccessLogs }}
       LoadBalancerAttributes:
+      {{- if .PublicHTTPConfig.ELBAccessLogs }}
         - Key: 'access_logs.s3.enabled'
           Value: true
           {{- if .PublicHTTPConfig.ELBAccessLogs.Prefix }}
@@ -315,6 +316,9 @@ Resources:
           {{- end }}
         - Key: 'access_logs.s3.bucket'
           Value: {{- if .PublicHTTPConfig.ELBAccessLogs.BucketName }} {{ .PublicHTTPConfig.ELBAccessLogs.BucketName }}{{- else }} !Ref ELBAccessLogsBucket {{- end }}
+      {{- else}}
+        - Key: 'access_logs.s3.enabled'
+          Value: false
       {{- end }}
       Scheme: internet-facing
       SecurityGroups: 
@@ -660,7 +664,41 @@ Resources:
         {{- end}}
       TemplateURL: {{.Addons.URL}}
 {{- end }}
-
+  LogResourcePolicy:
+    Metadata:
+      'aws:copilot:description': 'A resource policy to allow AWS services to create log streams for your workloads.'
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub '${AppName}-${EnvironmentName}-LogResourcePolicy'
+      PolicyDocument:
+        Fn::Sub: |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "StateMachineToCloudWatchLogs",
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": ["delivery.logs.amazonaws.com"]
+                },
+                "Action": [
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents"
+                ],
+                "Resource": [
+                  "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/copilot/${AppName}-${EnvironmentName}-*:log-stream:*"
+                ],
+                "Condition": {
+                  "StringEquals": {
+                    "aws:SourceAccount": "${AWS::AccountId}"
+                  },
+                  "ArnLike": {
+                    "aws:SourceArn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            ]
+          }
 Outputs:
   VpcId:
 {{- if .VPCConfig.Imported}}

@@ -34,7 +34,8 @@ type BackendServiceConfig struct {
 	EnvManifest        *manifest.Environment
 	Manifest           *manifest.BackendService
 	ArtifactBucketName string
-	RawManifest        []byte // Content of the manifest file without any transformations.
+	ArtifactKey        string
+	RawManifest        string
 	RuntimeConfig      RuntimeConfig
 	Addons             NestedStackConfigurer
 }
@@ -55,6 +56,7 @@ func NewBackendService(conf BackendServiceConfig) (*BackendService, error) {
 				app:                conf.App.Name,
 				permBound:          conf.App.PermissionsBoundary,
 				artifactBucketName: conf.ArtifactBucketName,
+				artifactKey:        conf.ArtifactKey,
 				rc:                 conf.RuntimeConfig,
 				image:              conf.Manifest.ImageConfig.Image,
 				rawManifest:        conf.RawManifest,
@@ -127,13 +129,10 @@ func (s *BackendService) Template() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var scConfig *template.ServiceConnect
-	if s.manifest.Network.Connect.Enabled() {
-		scConfig = convertServiceConnect(s.manifest.Network.Connect)
-	}
-	targetContainer, targetContainerPort, err := s.manifest.HTTP.Main.Target(exposedPorts)
-	if err != nil {
-		return "", err
+	scTarget := s.manifest.ServiceConnectTarget(exposedPorts)
+	scOpts := template.ServiceConnectOpts{
+		Server: convertServiceConnectServer(s.manifest.Network.Connect, scTarget),
+		Client: s.manifest.Network.Connect.Enabled(),
 	}
 
 	albListenerConfig, err := s.convertALBListener()
@@ -146,6 +145,7 @@ func (s *BackendService) Template() (string, error) {
 		AppName:            s.app,
 		EnvName:            s.env,
 		EnvVersion:         s.rc.EnvVersion,
+		Version:            s.rc.Version,
 		SerializedManifest: string(s.rawManifest),
 		WorkloadType:       manifestinfo.BackendServiceType,
 		WorkloadName:       s.name,
@@ -177,11 +177,7 @@ func (s *BackendService) Template() (string, error) {
 		Storage:                 convertStorageOpts(s.manifest.Name, s.manifest.Storage),
 
 		// ALB configs.
-		ALBEnabled: s.albEnabled,
-		HTTPTargetContainer: template.HTTPTargetContainer{
-			Port: targetContainerPort,
-			Name: targetContainer,
-		},
+		ALBEnabled:  s.albEnabled,
 		GracePeriod: s.convertGracePeriod(),
 		ALBListener: albListenerConfig,
 
@@ -192,7 +188,7 @@ func (s *BackendService) Template() (string, error) {
 		Sidecars: sidecars,
 
 		// service connect and service discovery options.
-		ServiceConnect:           scConfig,
+		ServiceConnectOpts:       scOpts,
 		ServiceDiscoveryEndpoint: s.rc.ServiceDiscoveryEndpoint,
 
 		// Additional options for request driven web service templates.

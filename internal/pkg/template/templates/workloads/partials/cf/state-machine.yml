@@ -20,9 +20,11 @@ StateMachine:
       Partition: !Ref AWS::Partition
       Subnets:
       {{- if .Network.SubnetIDs}}
-        {{- range $id := .Network.SubnetIDs}}
-        - {{$id}}
-        {{- end}}
+        Fn::Join:
+          - '","'
+          - {{- range $id := .Network.SubnetIDs}}
+            - {{$id}}
+            {{- end}}
       {{- else}}
         Fn::Join:
           - '","'
@@ -34,7 +36,7 @@ StateMachine:
       SecurityGroups:
         Fn::Join:
           - '","'
-          - - Fn::ImportValue: !Sub "${AppName}-${EnvName}-EnvironmentSecurityGroup"
+          - {{if not .Network.DenyDefaultSecurityGroup}}- Fn::ImportValue: !Sub "${AppName}-${EnvName}-EnvironmentSecurityGroup" {{end}}
             {{- range $sg := .Network.SecurityGroups}}
             {{- if not $sg.RequiresImport}}
             - {{$sg.Value}}

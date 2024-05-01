@@ -243,7 +243,7 @@ func TestBackendService_RequiredEnvironmentFeatures(t *testing.T) {
 						"mock-imported-volume": {
 							EFS: EFSConfigOrBool{
 								Advanced: EFSVolumeConfiguration{
-									FileSystemID: aws.String("mock-id"),
+									FileSystemID: StringOrFromCFN{Plain: aws.String("mock-id")},
 								},
 							},
 						},
@@ -259,7 +259,7 @@ func TestBackendService_RequiredEnvironmentFeatures(t *testing.T) {
 						"mock-imported-volume": {
 							EFS: EFSConfigOrBool{
 								Advanced: EFSVolumeConfiguration{
-									FileSystemID: aws.String("mock-id"),
+									FileSystemID: StringOrFromCFN{Plain: aws.String("mock-id")},
 								},
 							},
 						},
@@ -486,7 +486,7 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 					CPU: aws.Int(512),
 					Variables: map[string]Variable{
 						"LOG_LEVEL": {
-							stringOrFromCFN{
+							StringOrFromCFN{
 								Plain: stringP(""),
 							},
 						},
@@ -701,7 +701,7 @@ func TestBackendSvc_ApplyEnv(t *testing.T) {
 						},
 						Variables: map[string]Variable{
 							"LOG_LEVEL": {
-								stringOrFromCFN{
+								StringOrFromCFN{
 									Plain: stringP(""),
 								},
 							},
@@ -1205,6 +1205,85 @@ func TestBackendService_ExposedPorts(t *testing.T) {
 			// THEN
 			require.NoError(t, err)
 			require.Equal(t, tc.wantedExposedPorts, actual.PortsForContainer)
+		})
+	}
+}
+
+func TestBackendService_Dockerfile(t *testing.T) {
+	testCases := map[string]struct {
+		input                  *BackendService
+		expectedDockerfilePath string
+	}{
+		"specific dockerfile from buildargs": {
+			input: &BackendService{
+				BackendServiceConfig: BackendServiceConfig{
+					ImageConfig: ImageWithHealthcheckAndOptionalPort{
+						ImageWithOptionalPort: ImageWithOptionalPort{
+							Image: Image{
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build: BuildArgsOrString{
+										BuildArgs: DockerBuildArgs{
+											Dockerfile: aws.String("path/to/Dockerfile"),
+										},
+										BuildString: aws.String("other/path/to/Dockerfile"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedDockerfilePath: "path/to/Dockerfile",
+		},
+		"specific dockerfile from buildstring": {
+			input: &BackendService{
+				BackendServiceConfig: BackendServiceConfig{
+					ImageConfig: ImageWithHealthcheckAndOptionalPort{
+						ImageWithOptionalPort: ImageWithOptionalPort{
+							Image: Image{
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build: BuildArgsOrString{
+										BuildString: aws.String("path/to/Dockerfile"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedDockerfilePath: "path/to/Dockerfile",
+		},
+		"dockerfile from context": {
+			input: &BackendService{
+				BackendServiceConfig: BackendServiceConfig{
+					ImageConfig: ImageWithHealthcheckAndOptionalPort{
+						ImageWithOptionalPort: ImageWithOptionalPort{
+							Image: Image{
+								ImageLocationOrBuild: ImageLocationOrBuild{
+									Build: BuildArgsOrString{
+										BuildArgs: DockerBuildArgs{
+											Context: aws.String("path/to"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedDockerfilePath: "path/to/Dockerfile",
+		},
+	}
+
+	for name, tc := range testCases {
+		svc := tc.input
+
+		t.Run(name, func(t *testing.T) {
+			// WHEN
+			dockerfilePath := svc.Dockerfile()
+
+			// THEN
+			require.Equal(t, tc.expectedDockerfilePath, dockerfilePath)
 		})
 	}
 }

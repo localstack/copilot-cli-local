@@ -13,6 +13,7 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/cli/mocks"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"github.com/aws/copilot-cli/internal/pkg/workspace"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
@@ -88,7 +89,7 @@ func TestInitAppOpts_Validate(t *testing.T) {
 			inAppName: "123chicken",
 			mock:      func(m *initAppMocks) {},
 
-			wantedError: errors.New("application name 123chicken is invalid: value must start with a letter, contain only lower-case letters, numbers, and hyphens, and have no consecutive or trailing hyphen"),
+			wantedError: fmt.Errorf("application name 123chicken is invalid: %w", errBasicNameRegexNotMatched),
 		},
 		"errors if application with different domain already exists": {
 			inAppName:    "metrics",
@@ -132,7 +133,7 @@ func TestInitAppOpts_Validate(t *testing.T) {
 				m.mockProg.EXPECT().Start(gomock.Any())
 				m.mockProg.EXPECT().Stop(gomock.Any()).AnyTimes()
 				m.mockRoute53Svc.EXPECT().ValidateDomainOwnership("something.com").Return(errors.New("some error"))
-				m.mockRoute53Svc.EXPECT().DomainHostedZoneID("something.com").Return("mockHostedZoneID", nil)
+				m.mockRoute53Svc.EXPECT().PublicDomainHostedZoneID("something.com").Return("mockHostedZoneID", nil)
 			},
 		},
 		"wrap error from ListPolicies": {
@@ -156,9 +157,9 @@ func TestInitAppOpts_Validate(t *testing.T) {
 				m.mockProg.EXPECT().Start(gomock.Any())
 				m.mockProg.EXPECT().Stop(gomock.Any()).AnyTimes()
 				m.mockRoute53Svc.EXPECT().ValidateDomainOwnership("badMockDomain.com").Return(nil)
-				m.mockRoute53Svc.EXPECT().DomainHostedZoneID("badMockDomain.com").Return("", &route53.ErrDomainHostedZoneNotFound{})
+				m.mockRoute53Svc.EXPECT().PublicDomainHostedZoneID("badMockDomain.com").Return("", &route53.ErrDomainHostedZoneNotFound{})
 			},
-			wantedError: fmt.Errorf("get hosted zone ID for domain badMockDomain.com: %w", &route53.ErrDomainHostedZoneNotFound{}),
+			wantedError: fmt.Errorf("get public hosted zone ID for domain badMockDomain.com: %w", &route53.ErrDomainHostedZoneNotFound{}),
 		},
 		"errors if failed to validate that domain has a hosted zone": {
 			inDomainName: "mockDomain.com",
@@ -166,17 +167,20 @@ func TestInitAppOpts_Validate(t *testing.T) {
 				m.mockProg.EXPECT().Start(gomock.Any())
 				m.mockProg.EXPECT().Stop(gomock.Any()).AnyTimes()
 				m.mockRoute53Svc.EXPECT().ValidateDomainOwnership("mockDomain.com").Return(&route53.ErrUnmatchedNSRecords{})
-				m.mockRoute53Svc.EXPECT().DomainHostedZoneID("mockDomain.com").Return("", errors.New("some error"))
+				m.mockRoute53Svc.EXPECT().PublicDomainHostedZoneID("mockDomain.com").Return("", errors.New("some error"))
 			},
-			wantedError: errors.New("get hosted zone ID for domain mockDomain.com: some error"),
+			wantedError: errors.New("get public hosted zone ID for domain mockDomain.com: some error"),
 		},
-		"valid domain name": {
-			inDomainName: "mockDomain.com",
+		"valid": {
+			inPBPolicyName: "arn:aws:iam::1234567890:policy/myPermissionsBoundaryPolicy",
+			inDomainName:   "mockDomain.com",
 			mock: func(m *initAppMocks) {
 				m.mockProg.EXPECT().Start(`Validating ownership of "mockDomain.com"`)
 				m.mockProg.EXPECT().Stop("")
 				m.mockRoute53Svc.EXPECT().ValidateDomainOwnership("mockDomain.com").Return(nil)
-				m.mockRoute53Svc.EXPECT().DomainHostedZoneID("mockDomain.com").Return("mockHostedZoneID", nil)
+				m.mockPolicyLister.EXPECT().ListPolicyNames().Return(
+					[]string{"myPermissionsBoundaryPolicy"}, nil)
+				m.mockRoute53Svc.EXPECT().PublicDomainHostedZoneID("mockDomain.com").Return("mockHostedZoneID", nil)
 			},
 		},
 		"valid domain name containing multiple dots": {
@@ -185,7 +189,7 @@ func TestInitAppOpts_Validate(t *testing.T) {
 				m.mockProg.EXPECT().Start(gomock.Any())
 				m.mockProg.EXPECT().Stop(gomock.Any()).AnyTimes()
 				m.mockRoute53Svc.EXPECT().ValidateDomainOwnership("hello.dog.com").Return(nil)
-				m.mockRoute53Svc.EXPECT().DomainHostedZoneID("hello.dog.com").Return("mockHostedZoneID", nil)
+				m.mockRoute53Svc.EXPECT().PublicDomainHostedZoneID("hello.dog.com").Return("mockHostedZoneID", nil)
 			},
 		},
 	}
@@ -665,7 +669,7 @@ func TestInitAppOpts_Execute(t *testing.T) {
 					AdditionalTags: map[string]string{
 						"owner": "boss",
 					},
-					Version:             deploy.LatestAppTemplateVersion,
+					Version:             version.LatestTemplateVersion(),
 					PermissionsBoundary: "mockPolicy",
 				}).Return(nil)
 			},

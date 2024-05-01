@@ -61,7 +61,7 @@ func (backendSvcDeployer) IsServiceAvailableInRegion(region string) (bool, error
 
 // UploadArtifacts uploads the deployment artifacts such as the container image, custom resources, addons and env files.
 func (d *backendSvcDeployer) UploadArtifacts() (*UploadArtifactsOutput, error) {
-	return d.uploadArtifacts(d.uploadContainerImages, d.uploadArtifactsToS3, d.uploadCustomResources)
+	return d.uploadArtifacts(d.buildAndPushContainerImages, d.uploadArtifactsToS3, d.uploadCustomResources)
 }
 
 // GenerateCloudFormationTemplate generates a CloudFormation template and parameters for a workload.
@@ -106,6 +106,7 @@ func (d *backendSvcDeployer) stackConfiguration(in *StackRuntimeConfiguration) (
 			Manifest:           d.backendMft,
 			RawManifest:        d.rawMft,
 			ArtifactBucketName: d.resources.S3Bucket,
+			ArtifactKey:        d.resources.KMSKeyARN,
 			RuntimeConfig:      *rc,
 			Addons:             d.addons,
 		})
@@ -162,6 +163,5 @@ func (d *backendSvcDeployer) validateRuntimeRoutingRule(rule manifest.RoutingRul
 	if err := d.aliasCertValidator.ValidateCertAliases(aliases, d.envConfig.HTTPConfig.Private.Certificates); err != nil {
 		return fmt.Errorf("validate aliases against the imported certificate for env %s: %w", d.env.Name, err)
 	}
-
 	return nil
 }

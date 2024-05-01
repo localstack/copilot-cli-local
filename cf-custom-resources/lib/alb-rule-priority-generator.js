@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 "use strict";
 
-const aws = require("aws-sdk");
+const { ElasticLoadBalancingV2, DescribeRulesCommand} = require("@aws-sdk/client-elastic-load-balancing-v2");
 
-// minPriorityForRootRule is the min priority number for the the root path "/".
+// minPriorityForRootRule is the min priority number for the root path "/".
 const minPriorityForRootRule = 48000;
-// maxPriorityForRootRule is the max priority number for the the root path "/".
+// maxPriorityForRootRule is the max priority number for the root path "/".
 const maxPriorityForRootRule = 50000;
 
 // These are used for test purposes only
@@ -75,7 +75,7 @@ let report = function (
 };
 
 /**
- * Lists all the existing rules for a ALB Listener, finds the max of their
+ * Lists all the existing rules for an ALB Listener, finds the max of their
  * priorities, and then returns max + 1.
  *
  * @param {string} listenerArn the ARN of the ALB listener.
@@ -93,7 +93,7 @@ const calculateNextRulePriority = async function (listenerArn) {
         rule.Priority >= minPriorityForRootRule
       ) {
         // Ignore the root rule's priority.
-        // Ignore the default rule's prority since it's the same as 0.
+        // Ignore the default rule's priority since it's the same as 0.
         return 0;
       }
       return parseInt(rule.Priority);
@@ -104,7 +104,7 @@ const calculateNextRulePriority = async function (listenerArn) {
 };
 
 /**
- * Lists all the existing rules for a ALB Listener, finds the min of their root rule
+ * Lists all the existing rules for an ALB Listener, finds the min of their root rule
  * priorities, and then returns min - 1.
  *
  * @param {string} listenerArn the ARN of the ALB listener.
@@ -135,17 +135,16 @@ const calculateNextRootRulePriority = async function (listenerArn) {
 };
 
 const getListenerRules = async function (listenerArn) {
-  let elb = new aws.ELBv2();
+  let elb = new ElasticLoadBalancingV2();
   // Grab all the rules for this listener
   let marker;
   let rules = [];
   do {
     const rulesResponse = await elb
-      .describeRules({
+      .send(new DescribeRulesCommand({
         ListenerArn: listenerArn,
         Marker: marker,
-      })
-      .promise();
+      }));
 
     rules = rules.concat(rulesResponse.Rules);
     marker = rulesResponse.NextMarker;

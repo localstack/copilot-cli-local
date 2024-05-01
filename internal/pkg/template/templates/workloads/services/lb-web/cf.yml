@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a load balanced web service on Amazon ECS.
-{{- if .SerializedManifest }}
 Metadata:
+  Version: {{ .Version }}
+{{- if .SerializedManifest }}
   Manifest: |
 {{indent 4 .SerializedManifest}}
 {{- end }}
@@ -49,6 +50,9 @@ Parameters:
     Description: 'URL of the environment file for the {{$sidecar.Name}} sidecar.'
     Default: ""
 {{- end }}
+  ArtifactKeyARN:
+    Type: String
+    Description: 'KMS Key used for encrypting artifacts'
   TargetContainer:
     Type: String
   TargetPort:
@@ -116,19 +120,28 @@ Resources:
     Type: AWS::ECS::Service
     DependsOn:
     {{- if .ALBListener}}
-    {{- range $i, $rule := .ALBListener.Rules }}
-      {{- if $.ALBListener.IsHTTPS }}
+      {{- range $i, $rule := .ALBListener.Rules }}
+        {{- if $.ImportedALB}}
+          {{- if ne $.ImportedALB.HTTPSListenerARN ""}}
+      - HTTPSListenerRuleForImportedALB{{ if ne $i 0 }}{{ $i }}{{ end }}
+            {{- if ne $.ImportedALB.HTTPListenerARN ""}}
+      - HTTPListenerRedirectRuleForImportedALB{{ if ne $i 0 }}{{ $i }}{{ end }}
+            {{- end}}
+          {{- else if ne $.ImportedALB.HTTPListenerARN ""}}
+      - HTTPListenerRuleForImportedALB{{ if ne $i 0 }}{{ $i }}{{ end }}
+          {{- end}}
+        {{- else if $.ALBListener.IsHTTPS }}
       - HTTPListenerRuleWithDomain{{ if ne $i 0 }}{{ $i }}{{ end }}
       - HTTPSListenerRule{{ if ne $i 0 }}{{ $i }}{{ end }}
-      {{- else}}
+        {{- else}}
       - HTTPListenerRule{{ if ne $i 0 }}{{ $i }}{{ end }}
+        {{- end}}
       {{- end}}
-    {{- end}}
     {{- end }}
     {{- if .NLB}}
-    {{- range $i, $listener := .NLB.Listener }}
+      {{- range $i, $listener := .NLB.Listener }}
       - NLBListener{{ if ne $i 0 }}{{ $i }}{{ end }}
-    {{- end }}
+      {{- end }}
     {{- end}}
     Properties:
 {{include "service-base-properties" . | indent 6}}
@@ -138,17 +151,23 @@ Resources:
       {{- end }}
       LoadBalancers:
   {{- if .ALBListener}}
-  {{- range $i, $rule := .ALBListener.Rules}}
+    {{- range $i, $rule := .ALBListener.Rules}}
+      {{- if $.ImportedALB}}
+        - ContainerName: {{$rule.TargetContainer}}
+          ContainerPort: {{$rule.TargetPort}}
+          TargetGroupArn: !Ref TargetGroupForImportedALB{{ if ne $i 0 }}{{ $i }}{{ end }}
+      {{- else}}
         - ContainerName: {{$rule.TargetContainer}}
           ContainerPort: {{$rule.TargetPort}}
           TargetGroupArn: !Ref TargetGroup{{ if ne $i 0 }}{{ $i }}{{ end }}
-  {{- end}}
+      {{- end}}
+    {{- end}}
   {{- end}}
   {{- if .NLB}}
     {{- range $i, $listener := .NLB.Listener }}
         - ContainerName: {{$listener.TargetContainer}}
           ContainerPort: {{$listener.TargetPort}}
-          TargetGroupArn: !Ref NLBTargetGroup{{ if ne $i 0 }}{{ $i }}{{ end }}
+          TargetGroupArn: !Ref NetworkLoadBalancerTargetGroup{{ if ne $i 0 }}{{ $i }}{{ end }}
     {{- end }}
   {{- end }}
       ServiceRegistries:
@@ -157,6 +176,18 @@ Resources:
 
 {{- if .ALBListener}}
 {{include "alb" . | indent 2}}
+{{- end}}
+
+{{- if .ImportedALB}}
+{{- range $i, $secgrp := .ImportedALB.SecurityGroups }}
+  EnvironmentSecurityGroupIngressFromImportedALB{{ if ne $i 0 }}{{ $i }}{{ end }}:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EnvControllerAction.EnvironmentSecurityGroup
+      Description: Ingress from the imported ALB
+      SourceSecurityGroupId: {{ $secgrp.ID }}
+      IpProtocol: -1
+{{- end}}
 {{- end}}
 
 {{- if .NLB}}
@@ -177,7 +208,7 @@ Outputs:
       Name: !Sub ${AWS::StackName}-DiscoveryServiceARN
   {{- if .NLB}}
   PublicNetworkLoadBalancerDNSName:
-    Value: !GetAtt PublicNetworkLoadBalancer.DNSName
+    Value: !GetAtt PublicNetworkLoadBalancerV2.DNSName
     Export:
       Name: !Sub ${AWS::StackName}-PublicNetworkLoadBalancerDNSName
   {{- end}}

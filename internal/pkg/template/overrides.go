@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	cdkVersion              = "2.56.0"
+	cdkVersion              = "2.137.0"
 	cdkConstructsMinVersion = "10.0.0"
 	cdkTemplatesPath        = "overrides/cdk"
 
@@ -106,16 +106,18 @@ func (t CFNType) L1ConstructName() string {
 }
 
 // WalkOverridesCDKDir walks through the overrides/cdk templates and calls fn for each parsed template file.
-func (t *Template) WalkOverridesCDKDir(resources []CFNResource, fn WalkDirFunc) error {
+func (t *Template) WalkOverridesCDKDir(resources []CFNResource, fn WalkDirFunc, requiresEnv bool) error {
 	type metadata struct {
 		Version           string
 		ConstructsVersion string
 		Resources         cfnResources
+		RequiresEnv       bool
 	}
 	return t.walkDir(cdkTemplatesPath, cdkTemplatesPath, metadata{
 		Version:           cdkVersion,
 		ConstructsVersion: cdkConstructsMinVersion,
 		Resources:         resources,
+		RequiresEnv:       requiresEnv,
 	}, fn, WithFuncs(
 		map[string]interface{}{
 			// transform all the initial capital letters into lower letters.

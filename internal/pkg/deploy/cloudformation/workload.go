@@ -15,7 +15,7 @@ import (
 // DeployService deploys a service stack and renders progress updates to out until the deployment is done.
 // If the service stack doesn't exist, then it creates the stack.
 // If the service stack already exists, it updates the stack.
-func (cf CloudFormation) DeployService(conf StackConfiguration, bucketName string, opts ...cloudformation.StackOption) error {
+func (cf CloudFormation) DeployService(conf StackConfiguration, bucketName string, detach bool, opts ...cloudformation.StackOption) error {
 	templateURL, err := cf.uploadStackTemplateToS3(bucketName, conf)
 	if err != nil {
 		return err
@@ -27,7 +27,7 @@ func (cf CloudFormation) DeployService(conf StackConfiguration, bucketName strin
 	for _, opt := range opts {
 		opt(stack)
 	}
-	return cf.executeAndRenderChangeSet(cf.newUpsertChangeSetInput(cf.console, stack))
+	return cf.executeAndRenderChangeSet(cf.newUpsertChangeSetInput(cf.console, stack, withEnableInterrupt(), withDetach(detach)))
 }
 
 type uploadableStack interface {
@@ -65,7 +65,11 @@ func (cf CloudFormation) handleStackError(stackName string, err error) error {
 func (cf CloudFormation) DeleteWorkload(in deploy.DeleteWorkloadInput) error {
 	stackName := fmt.Sprintf("%s-%s-%s", in.AppName, in.EnvName, in.Name)
 	description := fmt.Sprintf("Delete stack %s", stackName)
-	return cf.deleteAndRenderStack(stackName, description, func() error {
-		return cf.cfnClient.DeleteAndWaitWithRoleARN(stackName, in.ExecutionRoleARN)
+	return cf.deleteAndRenderStack(deleteAndRenderInput{
+		stackName:   stackName,
+		description: description,
+		deleteFn: func() error {
+			return cf.cfnClient.DeleteAndWaitWithRoleARN(stackName, in.ExecutionRoleARN)
+		},
 	})
 }

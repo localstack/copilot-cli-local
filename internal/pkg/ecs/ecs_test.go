@@ -60,27 +60,41 @@ func TestClient_ClusterARN(t *testing.T) {
 			},
 			wantedError: fmt.Errorf(`no ECS cluster found with tags "copilot-application"="mockApp","copilot-environment"="mockEnv"`),
 		},
-		"errors if more than one cluster found": {
+		"errors if fail to get active clusters": {
 			setupMocks: func(m clientMocks) {
 				gomock.InOrder(
 					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgInput).
 						Return([]*resourcegroups.Resource{
 							{ARN: "mockARN1"}, {ARN: "mockARN2"},
 						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return(nil, fmt.Errorf("some error")),
 				)
 			},
-			wantedError: fmt.Errorf(`more than one ECS cluster are found with tags "copilot-application"="mockApp","copilot-environment"="mockEnv"`),
+			wantedError: fmt.Errorf(`check if clusters are active: some error`),
+		},
+		"errors if more than one active cluster found": {
+			setupMocks: func(m clientMocks) {
+				gomock.InOrder(
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1", "mockARN2"}, nil),
+				)
+			},
+			wantedError: fmt.Errorf(`more than one active ECS cluster are found with tags "copilot-application"="mockApp","copilot-environment"="mockEnv"`),
 		},
 		"success": {
 			setupMocks: func(m clientMocks) {
 				gomock.InOrder(
 					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgInput).
 						Return([]*resourcegroups.Resource{
-							{ARN: "mockARN"},
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
 						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
 				)
 			},
-			wantedCluster: "mockARN",
+			wantedCluster: "mockARN1",
 		},
 	}
 
@@ -90,15 +104,16 @@ func TestClient_ClusterARN(t *testing.T) {
 			defer ctrl.Finish()
 
 			// GIVEN
-			mockRgGetter := mocks.NewMockresourceGetter(ctrl)
 			mocks := clientMocks{
-				resourceGetter: mockRgGetter,
+				resourceGetter: mocks.NewMockresourceGetter(ctrl),
+				ecsClient:      mocks.NewMockecsClient(ctrl),
 			}
 
 			test.setupMocks(mocks)
 
 			client := Client{
-				rgGetter: mockRgGetter,
+				rgGetter:  mocks.resourceGetter,
+				ecsClient: mocks.ecsClient,
 			}
 
 			// WHEN
@@ -117,10 +132,16 @@ func TestClient_ClusterARN(t *testing.T) {
 
 func TestClient_serviceARN(t *testing.T) {
 	const (
-		mockApp = "mockApp"
-		mockEnv = "mockEnv"
-		mockSvc = "mockSvc"
+		mockApp     = "mockApp"
+		mockEnv     = "mockEnv"
+		mockSvc     = "mockSvc"
+		mockSvcARN1 = "arn:aws:ecs:us-west-2:1234567890:service/mockCluster/mockService1"
+		mockSvcARN2 = "arn:aws:ecs:us-west-2:1234567890:service/mockCluster/mockService2"
 	)
+	getRgEnvClusterInput := map[string]string{
+		deploy.AppTagKey: mockApp,
+		deploy.EnvTagKey: mockEnv,
+	}
 	getRgInput := map[string]string{
 		deploy.AppTagKey:     mockApp,
 		deploy.EnvTagKey:     mockEnv,
@@ -131,8 +152,8 @@ func TestClient_serviceARN(t *testing.T) {
 	tests := map[string]struct {
 		setupMocks func(mocks clientMocks)
 
-		wantedError   error
-		wantedService string
+		wantedError  error
+		wantedSvcArn string
 	}{
 		"errors if fail to get resources by tags": {
 			setupMocks: func(m clientMocks) {
@@ -157,22 +178,51 @@ func TestClient_serviceARN(t *testing.T) {
 				gomock.InOrder(
 					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
 						Return([]*resourcegroups.Resource{
+							{ARN: mockSvcARN1}, {ARN: mockSvcARN2},
+						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
 							{ARN: "mockARN1"}, {ARN: "mockARN2"},
 						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN1, mockSvcARN2}).Return([]string{mockSvcARN1, mockSvcARN2}, nil),
 				)
 			},
 			wantedError: fmt.Errorf(`more than one ECS service with tags "copilot-application"="mockApp","copilot-environment"="mockEnv","copilot-service"="mockSvc"`),
 		},
-		"success": {
+		"error if there is no active svc": {
 			setupMocks: func(m clientMocks) {
 				gomock.InOrder(
 					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
 						Return([]*resourcegroups.Resource{
-							{ARN: "mockARN"},
+							{ARN: mockSvcARN1}, {ARN: mockSvcARN2},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN1, mockSvcARN2}).Return([]string{}, nil),
 				)
 			},
-			wantedService: "mockARN",
+			wantedError: fmt.Errorf(`no active ECS service found`),
+		},
+		"success with only one active svc": {
+			setupMocks: func(m clientMocks) {
+				gomock.InOrder(
+					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: mockSvcARN1}, {ARN: mockSvcARN2},
+						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN1, mockSvcARN2}).Return([]string{mockSvcARN1}, nil),
+				)
+			},
+			wantedSvcArn: mockSvcARN1,
 		},
 	}
 
@@ -182,15 +232,16 @@ func TestClient_serviceARN(t *testing.T) {
 			defer ctrl.Finish()
 
 			// GIVEN
-			mockRgGetter := mocks.NewMockresourceGetter(ctrl)
 			mocks := clientMocks{
-				resourceGetter: mockRgGetter,
+				resourceGetter: mocks.NewMockresourceGetter(ctrl),
+				ecsClient:      mocks.NewMockecsClient(ctrl),
 			}
 
 			test.setupMocks(mocks)
 
 			client := Client{
-				rgGetter: mockRgGetter,
+				rgGetter:  mocks.resourceGetter,
+				ecsClient: mocks.ecsClient,
 			}
 
 			// WHEN
@@ -201,7 +252,7 @@ func TestClient_serviceARN(t *testing.T) {
 				require.EqualError(t, err, test.wantedError.Error())
 			} else {
 				require.NoError(t, err)
-				require.Equal(t, string(*get), test.wantedService)
+				require.Equal(t, get.String(), test.wantedSvcArn)
 			}
 		})
 	}
@@ -217,6 +268,10 @@ func TestClient_DescribeService(t *testing.T) {
 		mockCluster = "mockCluster"
 		mockService = "mockService"
 	)
+	getRgEnvClusterInput := map[string]string{
+		deploy.AppTagKey: mockApp,
+		deploy.EnvTagKey: mockEnv,
+	}
 	getRgInput := map[string]string{
 		deploy.AppTagKey:     mockApp,
 		deploy.EnvTagKey:     mockEnv,
@@ -229,17 +284,6 @@ func TestClient_DescribeService(t *testing.T) {
 		wantedError error
 		wanted      *ServiceDesc
 	}{
-		"return error if failed to get cluster name": {
-			setupMocks: func(m clientMocks) {
-				gomock.InOrder(
-					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
-						Return([]*resourcegroups.Resource{
-							{ARN: badSvcARN},
-						}, nil),
-				)
-			},
-			wantedError: fmt.Errorf("get cluster name: arn: invalid prefix"),
-		},
 		"return error if failed to get service tasks": {
 			setupMocks: func(m clientMocks) {
 				gomock.InOrder(
@@ -247,6 +291,12 @@ func TestClient_DescribeService(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().ServiceRunningTasks(mockCluster, mockService).Return(nil, errors.New("some error")),
 				)
 			},
@@ -259,6 +309,12 @@ func TestClient_DescribeService(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().ServiceRunningTasks(mockCluster, mockService).Return([]*ecs.Task{
 						{TaskArn: aws.String("mockTaskARN")},
 					}, nil),
@@ -274,6 +330,12 @@ func TestClient_DescribeService(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().ServiceRunningTasks(mockCluster, mockService).Return([]*ecs.Task{
 						{TaskArn: aws.String("mockTaskARN")},
 					}, nil),
@@ -339,6 +401,10 @@ func TestClient_Service(t *testing.T) {
 		mockService = "mockService"
 	)
 	mockError := errors.New("some error")
+	getRgEnvClusterInput := map[string]string{
+		deploy.AppTagKey: mockApp,
+		deploy.EnvTagKey: mockEnv,
+	}
 	getRgInput := map[string]string{
 		deploy.AppTagKey:     mockApp,
 		deploy.EnvTagKey:     mockEnv,
@@ -351,6 +417,32 @@ func TestClient_Service(t *testing.T) {
 		wantedError error
 		wanted      *ecs.Service
 	}{
+		"error if fail to get resources by tag": {
+			setupMocks: func(m clientMocks) {
+				gomock.InOrder(
+					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+						Return(nil, mockError),
+				)
+			},
+			wantedError: fmt.Errorf(`get ECS service with tags "copilot-application"="mockApp","copilot-environment"="mockEnv","copilot-service"="mockSvc": some error`),
+		},
+		"error if fail to filter for active services": {
+			setupMocks: func(m clientMocks) {
+				gomock.InOrder(
+					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: mockSvcARN},
+						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return(nil, mockError),
+				)
+			},
+			wantedError: fmt.Errorf("check if services are active in the cluster mockARN1: some error"),
+		},
 		"error if fail to describe ECS service": {
 			setupMocks: func(m clientMocks) {
 				gomock.InOrder(
@@ -358,6 +450,12 @@ func TestClient_Service(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(nil, mockError),
 				)
 			},
@@ -370,6 +468,12 @@ func TestClient_Service(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(nil, mockError),
 				)
 			},
@@ -382,6 +486,12 @@ func TestClient_Service(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(&ecs.Service{}, nil),
 				)
 			},
@@ -423,6 +533,222 @@ func TestClient_Service(t *testing.T) {
 	}
 }
 
+func TestClient_ServiceConnectServices(t *testing.T) {
+	const (
+		mockApp     = "mockApp"
+		mockEnv     = "mockEnv"
+		mockSvc     = "mockSvc"
+		mockSvcARN  = "arn:aws:ecs:us-west-2:1234567890:service/mockCluster/mockService"
+		mockCluster = "mockCluster"
+		mockService = "mockService"
+	)
+	mockError := errors.New("some error")
+	getRgEnvClusterInput := map[string]string{
+		deploy.AppTagKey: mockApp,
+		deploy.EnvTagKey: mockEnv,
+	}
+	getRgInput := map[string]string{
+		deploy.AppTagKey:     mockApp,
+		deploy.EnvTagKey:     mockEnv,
+		deploy.ServiceTagKey: mockSvc,
+	}
+
+	tests := map[string]struct {
+		setupMocks func(mocks clientMocks)
+
+		wantedError error
+		wanted      []*ecs.Service
+	}{
+		"error getting the service": {
+			setupMocks: func(m clientMocks) {
+				m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: mockSvcARN},
+					}, nil)
+				m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: "mockARN1"}, {ARN: "mockARN2"},
+					}, nil)
+				m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil)
+				m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil)
+				m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(nil, mockError)
+			},
+			wantedError: fmt.Errorf(`get service: get ECS service mockService: some error`),
+		},
+		"return early when no deployments": {
+			setupMocks: func(m clientMocks) {
+				m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: mockSvcARN},
+					}, nil)
+				m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: "mockARN1"}, {ARN: "mockARN2"},
+					}, nil)
+				m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil)
+				m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil)
+				m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(&ecs.Service{
+					Deployments: []*awsecs.Deployment{},
+				}, nil)
+			},
+		},
+		"return early when service connect is not enabled": {
+			setupMocks: func(m clientMocks) {
+				m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: mockSvcARN},
+					}, nil)
+				m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: "mockARN1"}, {ARN: "mockARN2"},
+					}, nil)
+				m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil)
+				m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil)
+				m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(&ecs.Service{
+					Deployments: []*awsecs.Deployment{
+						{},
+					},
+				}, nil)
+			},
+		},
+		"error listing namespace": {
+			setupMocks: func(m clientMocks) {
+				m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: mockSvcARN},
+					}, nil)
+				m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: "mockARN1"}, {ARN: "mockARN2"},
+					}, nil)
+				m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil)
+				m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil)
+				m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(&ecs.Service{
+					Deployments: []*awsecs.Deployment{
+						{
+							ServiceConnectConfiguration: &awsecs.ServiceConnectConfiguration{
+								Namespace: aws.String("namespace"),
+							},
+						},
+					},
+				}, nil)
+				m.ecsClient.EXPECT().ListServicesByNamespace("namespace").Return(nil, errors.New("some error"))
+			},
+			wantedError: fmt.Errorf(`get services in the same namespace: some error`),
+		},
+		"error getting namespaced services, svc arn removed": {
+			setupMocks: func(m clientMocks) {
+				m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: mockSvcARN},
+					}, nil)
+				m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: "cluster1"}, {ARN: "cluster2"},
+					}, nil)
+				m.ecsClient.EXPECT().ActiveClusters("cluster1", "cluster2").Return([]string{"cluster1"}, nil)
+				m.ecsClient.EXPECT().ActiveServices("cluster1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil)
+				m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(&ecs.Service{
+					ServiceArn: aws.String(mockSvcARN),
+					ClusterArn: aws.String("cluster1"),
+					Deployments: []*awsecs.Deployment{
+						{
+							ServiceConnectConfiguration: &awsecs.ServiceConnectConfiguration{
+								Namespace: aws.String("namespace"),
+							},
+						},
+					},
+				}, nil)
+				m.ecsClient.EXPECT().ListServicesByNamespace("namespace").Return([]string{
+					mockSvcARN,
+					"svc1",
+					"svc2",
+				}, nil)
+				m.ecsClient.EXPECT().Services("cluster1", "svc1", "svc2").Return(nil, errors.New("some error"))
+			},
+			wantedError: fmt.Errorf(`get services: some error`),
+		},
+		"success, svc arn not removed": {
+			setupMocks: func(m clientMocks) {
+				m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: mockSvcARN},
+					}, nil)
+				m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+					Return([]*resourcegroups.Resource{
+						{ARN: "cluster1"}, {ARN: "cluster2"},
+					}, nil)
+				m.ecsClient.EXPECT().ActiveClusters("cluster1", "cluster2").Return([]string{"cluster1"}, nil)
+				m.ecsClient.EXPECT().ActiveServices("cluster1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil)
+				m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(&ecs.Service{
+					ServiceArn: aws.String(mockSvcARN),
+					ClusterArn: aws.String("cluster1"),
+					Deployments: []*awsecs.Deployment{
+						{
+							ServiceConnectConfiguration: &awsecs.ServiceConnectConfiguration{
+								Namespace: aws.String("namespace"),
+							},
+						},
+					},
+				}, nil)
+				m.ecsClient.EXPECT().ListServicesByNamespace("namespace").Return([]string{
+					"svc1",
+					"svc2",
+				}, nil)
+				m.ecsClient.EXPECT().Services("cluster1", "svc1", "svc2").Return([]*ecs.Service{
+					{
+						ServiceArn: aws.String("svc1"),
+					},
+					{
+						ServiceArn: aws.String("svc2"),
+					},
+				}, nil)
+			},
+			wanted: []*ecs.Service{
+				{
+					ServiceArn: aws.String("svc1"),
+				},
+				{
+					ServiceArn: aws.String("svc2"),
+				},
+			},
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			// GIVEN
+			mockRgGetter := mocks.NewMockresourceGetter(ctrl)
+			mockECSClient := mocks.NewMockecsClient(ctrl)
+			mocks := clientMocks{
+				resourceGetter: mockRgGetter,
+				ecsClient:      mockECSClient,
+			}
+
+			test.setupMocks(mocks)
+
+			client := Client{
+				rgGetter:  mockRgGetter,
+				ecsClient: mockECSClient,
+			}
+
+			// WHEN
+			got, err := client.ServiceConnectServices(mockApp, mockEnv, mockSvc)
+
+			// THEN
+			if test.wantedError != nil {
+				require.EqualError(t, err, test.wantedError.Error())
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, got, test.wanted)
+			}
+		})
+	}
+}
+
 func TestClient_LastUpdatedAt(t *testing.T) {
 	const (
 		mockApp     = "mockApp"
@@ -434,6 +760,10 @@ func TestClient_LastUpdatedAt(t *testing.T) {
 	)
 	mockTime := time.Unix(1494505756, 0)
 	mockBeforeTime := time.Unix(1494505750, 0)
+	getRgEnvClusterInput := map[string]string{
+		deploy.AppTagKey: mockApp,
+		deploy.EnvTagKey: mockEnv,
+	}
 	getRgInput := map[string]string{
 		deploy.AppTagKey:     mockApp,
 		deploy.EnvTagKey:     mockEnv,
@@ -453,6 +783,12 @@ func TestClient_LastUpdatedAt(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(&ecs.Service{
 						Deployments: []*awsecs.Deployment{
 							{
@@ -517,6 +853,10 @@ func TestClient_ForceUpdateService(t *testing.T) {
 		deploy.EnvTagKey:     mockEnv,
 		deploy.ServiceTagKey: mockSvc,
 	}
+	getRgEnvClusterInput := map[string]string{
+		deploy.AppTagKey: mockApp,
+		deploy.EnvTagKey: mockEnv,
+	}
 
 	tests := map[string]struct {
 		setupMocks func(mocks clientMocks)
@@ -530,6 +870,12 @@ func TestClient_ForceUpdateService(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().UpdateService(mockCluster, mockService, gomock.Any()).Return(errors.New("some error")),
 				)
 			},
@@ -542,6 +888,12 @@ func TestClient_ForceUpdateService(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: mockSvcARN},
 						}, nil),
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgEnvClusterInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: "mockARN1"}, {ARN: "mockARN2"},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1"}, nil),
+					m.ecsClient.EXPECT().ActiveServices("mockARN1", []string{mockSvcARN}).Return([]string{mockSvcARN}, nil),
 					m.ecsClient.EXPECT().UpdateService(mockCluster, mockService, gomock.Any()).Return(nil),
 				)
 			},
@@ -772,6 +1124,7 @@ func TestClient_StopWorkloadTasks(t *testing.T) {
 			inTask: "service",
 
 			mockECS: func(m *mocks.MockecsClient) {
+				m.EXPECT().ActiveClusters(mockResource.ARN).Return([]string{mockResource.ARN}, nil).Times(2)
 				m.EXPECT().RunningTasksInFamily(mockCluster, "phonetool-pdx-service").Return(mockECSTask, nil)
 				m.EXPECT().StopTasks([]string{"deadbeef", "abcd"}, gomock.Any()).Return(nil)
 			},
@@ -788,6 +1141,7 @@ func TestClient_StopWorkloadTasks(t *testing.T) {
 			inTask: "service",
 
 			mockECS: func(m *mocks.MockecsClient) {
+				m.EXPECT().ActiveClusters(mockResource.ARN).Return([]string{mockResource.ARN}, nil).Times(2)
 				m.EXPECT().RunningTasksInFamily(mockCluster, "phonetool-pdx-service").Return([]*ecs.Task{}, nil)
 				m.EXPECT().StopTasks([]string{}, gomock.Any()).Return(nil)
 			},
@@ -818,6 +1172,7 @@ func TestClient_StopWorkloadTasks(t *testing.T) {
 			inTask: "service",
 
 			mockECS: func(m *mocks.MockecsClient) {
+				m.EXPECT().ActiveClusters(mockResource.ARN).Return([]string{mockResource.ARN}, nil).Times(2)
 				m.EXPECT().RunningTasksInFamily(mockCluster, "phonetool-pdx-service").Return(mockECSTask, nil)
 				m.EXPECT().StopTasks([]string{"deadbeef", "abcd"}, gomock.Any()).Return(errors.New("some error"))
 			},
@@ -891,6 +1246,7 @@ func TestClient_StopOneOffTasks(t *testing.T) {
 			inTask: "cooltask",
 
 			mockECS: func(m *mocks.MockecsClient) {
+				m.EXPECT().ActiveClusters(mockResource.ARN).Return([]string{mockResource.ARN}, nil).Times(2)
 				m.EXPECT().RunningTasksInFamily(mockCluster, "copilot-cooltask").Return(mockECSTask, nil)
 				m.EXPECT().StopTasks([]string{"deadbeef"}, gomock.Any()).Return(nil)
 			},
@@ -907,6 +1263,7 @@ func TestClient_StopOneOffTasks(t *testing.T) {
 			inTask: "cooltask",
 
 			mockECS: func(m *mocks.MockecsClient) {
+				m.EXPECT().ActiveClusters(mockResource.ARN).Return([]string{mockResource.ARN}, nil).Times(2)
 				m.EXPECT().RunningTasksInFamily(mockCluster, "copilot-cooltask").Return([]*ecs.Task{}, nil)
 				m.EXPECT().StopTasks([]string{}, gomock.Any()).Return(nil)
 			},
@@ -937,6 +1294,7 @@ func TestClient_StopOneOffTasks(t *testing.T) {
 			inTask: "cooltask",
 
 			mockECS: func(m *mocks.MockecsClient) {
+				m.EXPECT().ActiveClusters(mockResource.ARN).Return([]string{mockResource.ARN}, nil).Times(2)
 				m.EXPECT().RunningTasksInFamily(mockCluster, "copilot-cooltask").Return(mockECSTask, nil)
 				m.EXPECT().StopTasks([]string{"deadbeef"}, gomock.Any()).Return(errors.New("some error"))
 			},
@@ -1185,9 +1543,11 @@ func TestServiceDescriber_TaskDefinition(t *testing.T) {
 
 func Test_NetworkConfiguration(t *testing.T) {
 	const (
-		testApp = "phonetool"
-		testSvc = "svc"
-		testEnv = "test"
+		testApp        = "phonetool"
+		testSvc        = "svc"
+		testEnv        = "test"
+		mockSvcArn     = "arn:aws:ecs:us-west-2:1234567890:service/my-project-test-Cluster-9F7Y0RLP60R7/my-project-test-myService-JSOH5GYBFAIB"
+		mockClusterArn = "arn:aws:ecs:us-west-2:1234567890:cluster/my-project-test-Cluster-9F7Y0RLP60R7"
 	)
 	getRgInput := map[string]string{
 		deploy.AppTagKey: testApp,
@@ -1225,25 +1585,33 @@ func Test_NetworkConfiguration(t *testing.T) {
 						Return([]*resourcegroups.Resource{
 							{ARN: "mockARN1"}, {ARN: "mockARN2"},
 						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters("mockARN1", "mockARN2").Return([]string{"mockARN1", "mockARN2"}, nil),
 				)
 			},
-			wantedError: fmt.Errorf(`more than one ECS cluster are found with tags "copilot-application"="phonetool","copilot-environment"="test"`),
+			wantedError: fmt.Errorf(`more than one active ECS cluster are found with tags "copilot-application"="phonetool","copilot-environment"="test"`),
 		},
 		"successfully retrieve network configuration": {
 			setupMocks: func(m clientMocks) {
 				gomock.InOrder(
 					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgInput).
 						Return([]*resourcegroups.Resource{
-							{ARN: "cluster-1"},
+							{ARN: mockClusterArn},
 						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters(mockClusterArn).Return([]string{mockClusterArn}, nil),
 					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, map[string]string{
 						deploy.AppTagKey:     testApp,
 						deploy.EnvTagKey:     testEnv,
 						deploy.ServiceTagKey: testSvc,
 					}).Return([]*resourcegroups.Resource{
-						{ARN: "arn:aws:ecs:us-west-2:1234567890:service/my-project-test-Cluster-9F7Y0RLP60R7/my-project-test-myService-JSOH5GYBFAIB"},
+						{ARN: mockSvcArn},
 					}, nil),
-					m.ecsClient.EXPECT().NetworkConfiguration("cluster-1", "my-project-test-myService-JSOH5GYBFAIB").Return(&ecs.NetworkConfiguration{
+					m.resourceGetter.EXPECT().GetResourcesByTags(clusterResourceType, getRgInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: mockClusterArn},
+						}, nil),
+					m.ecsClient.EXPECT().ActiveClusters(mockClusterArn).Return([]string{mockClusterArn}, nil),
+					m.ecsClient.EXPECT().ActiveServices(mockClusterArn, []string{mockSvcArn}).Return([]string{mockSvcArn}, nil),
+					m.ecsClient.EXPECT().NetworkConfiguration(mockClusterArn, "my-project-test-myService-JSOH5GYBFAIB").Return(&ecs.NetworkConfiguration{
 						AssignPublicIp: "1.2.3.4",
 						SecurityGroups: []string{"sg-1", "sg-2"},
 						Subnets:        []string{"sn-1", "sn-2"},

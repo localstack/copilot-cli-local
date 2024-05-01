@@ -189,6 +189,21 @@ func (mr *MockecsClientMockRecorder) Service(clusterName, serviceName interface{
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Service", reflect.TypeOf((*MockecsClient)(nil).Service), clusterName, serviceName)
 }
 
+// StoppedServiceTasks mocks base method.
+func (m *MockecsClient) StoppedServiceTasks(cluster, service string) ([]*ecs.Task, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "StoppedServiceTasks", cluster, service)
+	ret0, _ := ret[0].([]*ecs.Task)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// StoppedServiceTasks indicates an expected call of StoppedServiceTasks.
+func (mr *MockecsClientMockRecorder) StoppedServiceTasks(cluster, service interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StoppedServiceTasks", reflect.TypeOf((*MockecsClient)(nil).StoppedServiceTasks), cluster, service)
+}
+
 // MockcwClient is a mock of cwClient interface.
 type MockcwClient struct {
 	ctrl     *gomock.Controller
@@ -252,6 +267,20 @@ func NewMockcfnClient(ctrl *gomock.Controller) *MockcfnClient {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockcfnClient) EXPECT() *MockcfnClientMockRecorder {
 	return m.recorder
+}
+
+// CancelUpdateStack mocks base method.
+func (m *MockcfnClient) CancelUpdateStack(stackName string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CancelUpdateStack", stackName)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// CancelUpdateStack indicates an expected call of CancelUpdateStack.
+func (mr *MockcfnClientMockRecorder) CancelUpdateStack(stackName interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CancelUpdateStack", reflect.TypeOf((*MockcfnClient)(nil).CancelUpdateStack), stackName)
 }
 
 // Create mocks base method.
@@ -644,6 +673,20 @@ func (m *Mocks3Client) EXPECT() *Mocks3ClientMockRecorder {
 	return m.recorder
 }
 
+// EmptyBucket mocks base method.
+func (m *Mocks3Client) EmptyBucket(bucket string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "EmptyBucket", bucket)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// EmptyBucket indicates an expected call of EmptyBucket.
+func (mr *Mocks3ClientMockRecorder) EmptyBucket(bucket interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EmptyBucket", reflect.TypeOf((*Mocks3Client)(nil).EmptyBucket), bucket)
+}
+
 // Upload mocks base method.
 func (m *Mocks3Client) Upload(bucket, fileName string, data io.Reader) (string, error) {
 	m.ctrl.T.Helper()
@@ -657,6 +700,43 @@ func (m *Mocks3Client) Upload(bucket, fileName string, data io.Reader) (string, 
 func (mr *Mocks3ClientMockRecorder) Upload(bucket, fileName, data interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Upload", reflect.TypeOf((*Mocks3Client)(nil).Upload), bucket, fileName, data)
+}
+
+// MockimageRemover is a mock of imageRemover interface.
+type MockimageRemover struct {
+	ctrl     *gomock.Controller
+	recorder *MockimageRemoverMockRecorder
+}
+
+// MockimageRemoverMockRecorder is the mock recorder for MockimageRemover.
+type MockimageRemoverMockRecorder struct {
+	mock *MockimageRemover
+}
+
+// NewMockimageRemover creates a new mock instance.
+func NewMockimageRemover(ctrl *gomock.Controller) *MockimageRemover {
+	mock := &MockimageRemover{ctrl: ctrl}
+	mock.recorder = &MockimageRemoverMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockimageRemover) EXPECT() *MockimageRemoverMockRecorder {
+	return m.recorder
+}
+
+// ClearRepository mocks base method.
+func (m *MockimageRemover) ClearRepository(repoName string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearRepository", repoName)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ClearRepository indicates an expected call of ClearRepository.
+func (mr *MockimageRemoverMockRecorder) ClearRepository(repoName interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearRepository", reflect.TypeOf((*MockimageRemover)(nil).ClearRepository), repoName)
 }
 
 // MockstackSetClient is a mock of stackSetClient interface.
@@ -757,6 +837,21 @@ func (m *MockstackSetClient) DeleteAllInstances(name string) (string, error) {
 func (mr *MockstackSetClientMockRecorder) DeleteAllInstances(name interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteAllInstances", reflect.TypeOf((*MockstackSetClient)(nil).DeleteAllInstances), name)
+}
+
+// DeleteInstance mocks base method.
+func (m *MockstackSetClient) DeleteInstance(name, account, region string) (string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteInstance", name, account, region)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// DeleteInstance indicates an expected call of DeleteInstance.
+func (mr *MockstackSetClientMockRecorder) DeleteInstance(name, account, region interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteInstance", reflect.TypeOf((*MockstackSetClient)(nil).DeleteInstance), name, account, region)
 }
 
 // Describe mocks base method.

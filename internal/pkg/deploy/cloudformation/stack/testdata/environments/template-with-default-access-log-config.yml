@@ -61,6 +61,7 @@ Conditions:
   ManagedAliases: !And
     - !Condition DelegateDNS
     - !Not [!Equals [ !Ref Aliases, "" ]]
+    - !Condition CreateALB
 Mappings:
   RegionalConfigs:
     us-east-1:
@@ -218,13 +219,15 @@ Resources:
                   "ecs:DescribeTaskDefinition",
                   "ecs:ListTaskDefinitions",
                   "ecs:ListClusters",
-                  "ecs:RunTask"
+                  "ecs:RunTask",
+                  "ecs:ListServicesByNamespace"
                 ]
                 Resource: "*"
               - Sid: ExecuteCommand
                 Effect: Allow
                 Action: [
-                  "ecs:ExecuteCommand"
+                  "ecs:ExecuteCommand",
+                  "ssm:StartSession"
                 ]
                 Resource: "*"
                 Condition:
@@ -313,6 +316,12 @@ Resources:
                 ]
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/copilot/${AppName}/${EnvironmentName}/secrets/*'
+              - Sid: SSMSession
+                Effect: Allow
+                Action:
+                  - ssm:StartSession
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-StartPortForwardingSessionToRemoteHost"
               - Sid: ELBv2
                 Effect: Allow
                 Action: [
@@ -371,6 +380,11 @@ Resources:
                   "kms:Decrypt"
                 ]
                 Resource: "*"
+              - Sid: EmptyELBAccessLogsBucket
+                Effect: Allow
+                Action:
+                  - s3:EmptyBucket
+                Resource: !Join [ "/" , [!GetAtt ELBAccessLogsBucket.Arn, "*"]]
               - Sid: PutObjectsToArtifactBucket
                 Effect: Allow
                 Action:
@@ -435,6 +449,17 @@ Resources:
                   - 'cloudformation:DeleteStack'
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+              - Sid: ListStacks
+                Effect: Allow
+                Action:
+                  - 'cloudformation:ListStacks'
+                Resource: "*"
+              - Sid: RDS
+                Effect: Allow
+                Action:
+                  - 'rds:DescribeDBInstances'
+                  - 'rds:DescribeDBClusters'
+                Resource: "*"
   
   VPC:
     Metadata:
@@ -712,7 +737,6 @@ Resources:
     Metadata:
       "aws:copilot:description": "A S3 bucket for the Load Balancer's access logs"
     Type: AWS::S3::Bucket
-    Condition: CreateALB
     Properties:
       VersioningConfiguration:
         Status: Enabled
@@ -720,6 +744,11 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
   ELBAccessLogsBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Condition: CreateALB
@@ -744,6 +773,57 @@ Resources:
                   - '/*'
             Principal:
               AWS: !Join [ "", [ !Ref 'arn:${AWS::Partition}:iam::', !FindInMap [ RegionalConfigs, !Ref 'AWS::Region', ElbAccountId ], ":root" ] ]
+  ELBAccessLogsBucketCleanerAction:
+    Metadata:
+      'aws:copilot:description': 'A custom resource that empties the ELB access logs bucket'
+    Type: Custom::BucketCleanerFunction
+    Properties:
+      ServiceToken: !GetAtt BucketCleanerFunction.Arn
+      BucketName: !Ref ELBAccessLogsBucket
+
+  BucketCleanerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: "index.handler"
+      Timeout: 900
+      MemorySize: 512
+      Role: !GetAtt 'ELBAccessLogsBucketCleanerRole.Arn'
+      Runtime: nodejs20.x
+
+  ELBAccessLogsBucketCleanerRole:
+    Metadata:
+      'aws:copilot:description': 'An IAM role to clean the ELB access logs bucket'
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: "CleanELBAccessLogs"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                Resource: 
+                  - !GetAtt ELBAccessLogsBucket.Arn
+                  - !Sub
+                    - ${ BucketARN }/*
+                    - BucketARN: !GetAtt ELBAccessLogsBucket.Arn
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
   EnvironmentSecurityGroupIngressFromInternalALB:
     Type: AWS::EC2::SecurityGroupIngress
     Condition: CreateInternalALB
@@ -1018,7 +1098,7 @@ Resources:
       Timeout: 900
       MemorySize: 512
       Role: !GetAtt 'CustomResourceRole.Arn'
-      Runtime: nodejs16.x
+      Runtime: nodejs20.x
   
   CustomDomainFunction:
     Condition: ManagedAliases
@@ -1028,7 +1108,7 @@ Resources:
       Timeout: 600
       MemorySize: 512
       Role: !GetAtt 'CustomResourceRole.Arn'
-      Runtime: nodejs16.x
+      Runtime: nodejs20.x
   
   DNSDelegationFunction:
     Type: AWS::Lambda::Function
@@ -1038,7 +1118,7 @@ Resources:
       Timeout: 600
       MemorySize: 512
       Role: !GetAtt 'CustomResourceRole.Arn'
-      Runtime: nodejs16.x
+      Runtime: nodejs20.x
   DelegateDNSAction:
     Metadata:
       'aws:copilot:description': 'Delegate DNS for environment subdomain'
@@ -1122,6 +1202,41 @@ Resources:
       SubnetIds:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
+  LogResourcePolicy:
+    Metadata:
+      'aws:copilot:description': 'A resource policy to allow AWS services to create log streams for your workloads.'
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub '${AppName}-${EnvironmentName}-LogResourcePolicy'
+      PolicyDocument:
+        Fn::Sub: |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "StateMachineToCloudWatchLogs",
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": ["delivery.logs.amazonaws.com"]
+                },
+                "Action": [
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents"
+                ],
+                "Resource": [
+                  "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/copilot/${AppName}-${EnvironmentName}-*:log-stream:*"
+                ],
+                "Condition": {
+                  "StringEquals": {
+                    "aws:SourceAccount": "${AWS::AccountId}"
+                  },
+                  "ArnLike": {
+                    "aws:SourceArn": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            ]
+          }
 Outputs:
   VpcId:
     Value: !Ref VPC

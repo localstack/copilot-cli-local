@@ -147,14 +147,14 @@ environments:
 							},
 							Variables: map[string]Variable{
 								"LOG_LEVEL": {
-									stringOrFromCFN{
+									StringOrFromCFN{
 										Plain: stringP("WARN"),
 									},
 								},
 							},
 							Secrets: map[string]Secret{
 								"DB_PASSWORD": {
-									from: stringOrFromCFN{
+									from: StringOrFromCFN{
 										Plain: aws.String("MYSQL_DB_PASSWORD"),
 									},
 								},
@@ -194,7 +194,7 @@ environments:
 							ConfigFile:     aws.String("/extra.conf"),
 							SecretOptions: map[string]Secret{
 								"LOG_TOKEN": {
-									from: stringOrFromCFN{
+									from: StringOrFromCFN{
 										Plain: aws.String("LOG_TOKEN"),
 									},
 								},
@@ -324,7 +324,7 @@ secrets:
 							},
 							Secrets: map[string]Secret{
 								"API_TOKEN": {
-									from: stringOrFromCFN{
+									from: StringOrFromCFN{
 										Plain: aws.String("SUBS_API_TOKEN"),
 									},
 								},
@@ -459,7 +459,7 @@ type: 'OH NO'
 
 func TestStringOrFromCFN_UnmarshalYAML(t *testing.T) {
 	type mockField struct {
-		stringOrFromCFN
+		StringOrFromCFN
 	}
 	type mockParentField struct {
 		MockField mockField `yaml:"mock_field"`
@@ -473,7 +473,7 @@ func TestStringOrFromCFN_UnmarshalYAML(t *testing.T) {
 			in: []byte(`mock_field: hey`),
 			wanted: mockParentField{
 				MockField: mockField{
-					stringOrFromCFN{
+					StringOrFromCFN{
 						Plain: aws.String("hey"),
 					},
 				},
@@ -484,7 +484,7 @@ func TestStringOrFromCFN_UnmarshalYAML(t *testing.T) {
   from_cfn: yo`),
 			wanted: mockParentField{
 				MockField: mockField{
-					stringOrFromCFN{
+					StringOrFromCFN{
 						FromCFN: fromCFN{
 							Name: aws.String("yo"),
 						},
@@ -1029,6 +1029,89 @@ func TestLoadBalancedWebService_NetworkLoadBalancerTarget(t *testing.T) {
 					require.Equal(t, tc.wantedTargetPort[idx], targetPort)
 				}
 			}
+		})
+	}
+}
+
+func TestLoadBalancedWebService_ServiceConnectTarget(t *testing.T) {
+	testCases := map[string]struct {
+		in                         LoadBalancedWebService
+		wantedServiceConnectTarget *ServiceConnectTargetContainer
+	}{
+		"should return primary container name/image port as targetContainer/targetPort in case targetContainer and targetPort is not given": {
+			in: LoadBalancedWebService{
+				Workload: Workload{
+					Name: aws.String("foo"),
+					Type: aws.String("Load Balanced WebService"),
+				},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: ImageWithPortAndHealthcheck{
+						ImageWithPort: ImageWithPort{
+							Port: aws.Uint16(80),
+						},
+					},
+				},
+			},
+			wantedServiceConnectTarget: &ServiceConnectTargetContainer{
+				Container: "foo",
+				Port:      "80",
+			},
+		},
+		"should return alb targetContainer/targetPort if main routing rule is defined": {
+			in: LoadBalancedWebService{
+				Workload: Workload{
+					Name: aws.String("foo"),
+					Type: aws.String("Load Balanced WebService"),
+				},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: ImageWithPortAndHealthcheck{
+						ImageWithPort: ImageWithPort{
+							Port: aws.Uint16(80),
+						},
+					},
+					HTTPOrBool: HTTPOrBool{
+						HTTP: HTTP{
+							Main: RoutingRule{
+								TargetContainer: aws.String("foo"),
+								TargetPort:      aws.Uint16(8080),
+							},
+						},
+					},
+				},
+			},
+			wantedServiceConnectTarget: &ServiceConnectTargetContainer{
+				Container: "foo",
+				Port:      "8080",
+			},
+		},
+		"should return nil if container protocol is udp": {
+			in: LoadBalancedWebService{
+				Workload: Workload{
+					Name: aws.String("foo"),
+					Type: aws.String("Load Balanced WebService"),
+				},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: ImageWithPortAndHealthcheck{
+						ImageWithPort: ImageWithPort{
+							Port: aws.Uint16(80),
+						},
+					},
+					NLBConfig: NetworkLoadBalancerConfiguration{
+						Listener: NetworkLoadBalancerListener{
+							Port: aws.String("80/udp"),
+						},
+					},
+				},
+			},
+			wantedServiceConnectTarget: nil,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			exposedPorts, _ := tc.in.ExposedPorts()
+			targetSCContainer := tc.in.ServiceConnectTarget(exposedPorts)
+			require.Equal(t, tc.wantedServiceConnectTarget, targetSCContainer)
 		})
 	}
 }

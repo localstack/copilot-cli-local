@@ -6,10 +6,12 @@ package cli
 import (
 	"fmt"
 	"os"
+	"slices"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/aws/copilot-cli/internal/pkg/aws/identity"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
 	"github.com/aws/copilot-cli/internal/pkg/config"
@@ -28,13 +30,14 @@ const (
 )
 
 type packageJobVars struct {
-	name         string
-	envName      string
-	appName      string
-	tag          string
-	outputDir    string
-	uploadAssets bool
-	showDiff     bool
+	name               string
+	envName            string
+	appName            string
+	tag                string
+	outputDir          string
+	uploadAssets       bool
+	showDiff           bool
+	allowWkldDowngrade bool
 }
 
 type packageJobOpts struct {
@@ -70,19 +73,21 @@ func newPackageJobOpts(vars packageJobVars) (*packageJobOpts, error) {
 		ws:             ws,
 		store:          store,
 		runner:         exec.NewCmd(),
-		sel:            selector.NewLocalWorkloadSelector(prompter, store, ws),
+		sel:            selector.NewLocalWorkloadSelector(prompter, store, ws, selector.OnlyInitializedWorkloads),
 		prompt:         prompter,
 	}
 
 	opts.newPackageCmd = func(o *packageJobOpts) {
 		opts.packageCmd = &packageSvcOpts{
 			packageSvcVars: packageSvcVars{
-				name:         o.name,
-				envName:      o.envName,
-				appName:      o.appName,
-				tag:          o.tag,
-				outputDir:    o.outputDir,
-				uploadAssets: o.uploadAssets,
+				name:               o.name,
+				envName:            o.envName,
+				appName:            o.appName,
+				tag:                o.tag,
+				outputDir:          o.outputDir,
+				uploadAssets:       o.uploadAssets,
+				allowWkldDowngrade: o.allowWkldDowngrade,
+				showDiff:           o.showDiff,
 			},
 			runner:            o.runner,
 			ws:                ws,
@@ -92,10 +97,12 @@ func newPackageJobOpts(vars packageJobVars) (*packageJobOpts, error) {
 			newInterpolator:   newManifestInterpolator,
 			paramsWriter:      discardFile{},
 			addonsWriter:      discardFile{},
+			diffWriter:        os.Stdout,
 			fs:                fs,
 			sessProvider:      sessProvider,
 			newStackGenerator: newWorkloadStackGenerator,
 			gitShortCommit:    imageTagFromGit(o.runner),
+			templateVersion:   version.LatestTemplateVersion(),
 		}
 	}
 	return opts, nil
@@ -111,7 +118,7 @@ func (o *packageJobOpts) Validate() error {
 		if err != nil {
 			return fmt.Errorf("list jobs in the workspace: %w", err)
 		}
-		if !contains(o.name, names) {
+		if !slices.Contains(names, o.name) {
 			return fmt.Errorf("job '%s' does not exist in the workspace", o.name)
 		}
 	}
@@ -203,6 +210,7 @@ func buildJobPackageCmd() *cobra.Command {
 	cmd.Flags().StringVar(&vars.outputDir, stackOutputDirFlag, "", stackOutputDirFlagDescription)
 	cmd.Flags().BoolVar(&vars.uploadAssets, uploadAssetsFlag, false, uploadAssetsFlagDescription)
 	cmd.Flags().BoolVar(&vars.showDiff, diffFlag, false, diffFlagDescription)
+	cmd.Flags().BoolVar(&vars.allowWkldDowngrade, allowDowngradeFlag, false, allowDowngradeFlagDescription)
 
 	cmd.MarkFlagsMutuallyExclusive(diffFlag, stackOutputDirFlag)
 	cmd.MarkFlagsMutuallyExclusive(diffFlag, uploadAssetsFlag)

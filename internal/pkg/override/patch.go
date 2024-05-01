@@ -14,8 +14,8 @@ import (
 )
 
 const (
+	YAMLPatchFile        = "cfn.patches.yml" // YAMLPatchFile is the name of the YAML patch override file.
 	jsonPointerSeparator = "/"
-	yamlPatchFile        = "cfn.patches.yml"
 )
 
 // ScaffoldWithPatch sets up YAML patches in dir/ to apply to the
@@ -62,11 +62,8 @@ func WithPatch(filePath string, opts PatchOpts) *Patch {
 // after applying YAML patches to it.
 func (p *Patch) Override(body []byte) ([]byte, error) {
 	patches, err := unmarshalPatches(p.filePath, p.fs)
-	switch {
-	case err != nil:
+	if err != nil {
 		return nil, err
-	case len(patches) == 0:
-		return nil, fmt.Errorf("no YAML patches configured")
 	}
 
 	var root yaml.Node
@@ -101,7 +98,7 @@ func (p *Patch) Override(body []byte) ([]byte, error) {
 }
 
 func unmarshalPatches(path string, fs afero.Fs) ([]yamlPatch, error) {
-	path = filepath.Join(path, yamlPatchFile)
+	path = filepath.Join(path, YAMLPatchFile)
 	content, err := afero.ReadFile(fs, path)
 	if err != nil {
 		return nil, fmt.Errorf("read file at %q: %w", path, err)

@@ -5,7 +5,9 @@ package template
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strconv"
 	"text/template"
 
@@ -109,6 +111,7 @@ var (
 		"vpc-connector",
 		"alb",
 		"rollback-alarms",
+		"imported-alb-resources",
 	}
 
 	// Operating systems to determine Fargate platform versions.
@@ -173,7 +176,7 @@ func (s *StorageOpts) requiresEFSCreation() bool {
 
 // EFSPermission holds information needed to render an IAM policy statement.
 type EFSPermission struct {
-	FilesystemID  *string
+	FilesystemID  FileSystemID
 	Write         bool
 	AccessPointID *string
 }
@@ -203,7 +206,7 @@ type ManagedVolumeCreationInfo struct {
 // EFSVolumeConfiguration contains information about how to specify externally managed file systems.
 type EFSVolumeConfiguration struct {
 	// EFSVolumeConfiguration
-	Filesystem    *string
+	Filesystem    FileSystemID
 	RootDirectory *string // "/" or empty are equivalent
 
 	// Authorization Config
@@ -221,17 +224,6 @@ type LogConfigOpts struct {
 	ConfigFile     *string
 	Variables      map[string]Variable
 	Secrets        map[string]Secret
-}
-
-// HTTPTargetContainer represents the target group of a load balancer that points to a container.
-type HTTPTargetContainer struct {
-	Name string
-	Port string
-}
-
-// Exposed returns true if the target container has an accessible port to receive traffic.
-func (tg HTTPTargetContainer) Exposed() bool {
-	return tg.Port != "" && tg.Port != NoExposedContainerPort
 }
 
 // StrconvUint16 returns string converted from uint16.
@@ -262,6 +254,43 @@ type importable interface {
 type importableValue interface {
 	importable
 	Value() string
+}
+
+// FileSystemID represnts the EFS FilesystemID.
+type FileSystemID importableValue
+
+// PlainFileSystemID returns a EFS FilesystemID that is a plain string value.
+func PlainFileSystemID(value string) FileSystemID {
+	return plainFileSystemID(value)
+}
+
+// ImportedFileSystemID returns a EFS FilesystemID that is imported from a stack.
+func ImportedFileSystemID(value string) FileSystemID {
+	return importedFileSystemID(value)
+}
+
+type plainFileSystemID string
+
+// RequiresImport returns false for a plain EFS FilesystemID.
+func (fs plainFileSystemID) RequiresImport() bool {
+	return false
+}
+
+// Value returns the plain string value of the plain EFS FilesystemID.
+func (fs plainFileSystemID) Value() string {
+	return string(fs)
+}
+
+type importedFileSystemID string
+
+// RequiresImport returns true for a imported EFS FilesystemID.
+func (fs importedFileSystemID) RequiresImport() bool {
+	return true
+}
+
+// Value returns the name of the import that will be the value of the EFS Filesystem ID.
+func (fs importedFileSystemID) Value() string {
+	return string(fs)
 }
 
 // Variable represents the value of an environment variable.
@@ -425,7 +454,6 @@ type NLBHealthCheck struct {
 
 // NetworkLoadBalancer holds configuration that's needed for a Network Load Balancer.
 type NetworkLoadBalancer struct {
-	PublicSubnetCIDRs   []string
 	Listener            []NetworkLoadBalancerListener
 	MainContainerPort   string
 	CertificateRequired bool
@@ -482,9 +510,18 @@ func (cfg *ALBListener) RulePaths() []string {
 	return rulePaths
 }
 
-// ServiceConnect holds configuration for ECS Service Connect.
-type ServiceConnect struct {
-	Alias *string
+// ServiceConnectOpts defines the options for service connect.
+// If Client is false, logically Server must be nil.
+type ServiceConnectOpts struct {
+	Server *ServiceConnectServer
+	Client bool
+}
+
+// ServiceConnectServer defines the container name and port which a service routes Service Connect through.
+type ServiceConnectServer struct {
+	Name  string
+	Port  string
+	Alias string
 }
 
 // AdvancedCount holds configuration for autoscaling and capacity provider
@@ -753,6 +790,7 @@ type WorkloadOpts struct {
 	WorkloadName       string
 	SerializedManifest string // Raw manifest file used to deploy the workload.
 	EnvVersion         string
+	Version            string
 
 	// Configuration for the main container.
 	PortMappings []*PortMapping
@@ -760,6 +798,7 @@ type WorkloadOpts struct {
 	Secrets      map[string]Secret
 	EntryPoint   []string
 	Command      []string
+	ImportedALB  *ImportedALB
 
 	// Additional options that are common between **all** workload templates.
 	Tags                     map[string]string        // Used by App Runner workloads to tag App Runner service resources
@@ -785,12 +824,11 @@ type WorkloadOpts struct {
 	// Additional options for service templates.
 	WorkloadType            string
 	HealthCheck             *ContainerHealthCheck
-	HTTPTargetContainer     HTTPTargetContainer
 	GracePeriod             *int64
 	NLB                     *NetworkLoadBalancer
 	ALBListener             *ALBListener
 	DeploymentConfiguration DeploymentConfigurationOpts
-	ServiceConnect          *ServiceConnect
+	ServiceConnectOpts      ServiceConnectOpts
 
 	// Custom Resources backed by Lambda functions.
 	CustomResources map[string]S3ObjectLocation
@@ -820,6 +858,7 @@ type WorkloadOpts struct {
 	AssetMappingFileBucket string
 	AssetMappingFilePath   string
 	StaticSiteAlias        string
+	StaticSiteCert         string
 }
 
 // HealthCheckProtocol returns the protocol for the Load Balancer health check,
@@ -836,6 +875,49 @@ func (lr ALBListenerRule) HealthCheckProtocol() string {
 		// for backwards compatability, only set HTTP if target
 		// container is https but the specified health check port is not
 		return "HTTP"
+	}
+	return ""
+}
+
+// ImportedALB holds the fields to import an existing ALB.
+type ImportedALB struct {
+	Name         string
+	ARN          string
+	DNSName      string
+	HostedZoneID string
+
+	Listeners      []LBListener
+	SecurityGroups []LBSecurityGroup
+}
+
+// LBListener struct represents the listener of a load balancer. // TODO(jwh): instead, reuse ALBListener
+type LBListener struct {
+	ARN      string
+	Port     int64
+	Protocol string
+}
+
+// LBSecurityGroup struct represents the security group of a load balancer.
+type LBSecurityGroup struct {
+	ID string
+}
+
+// HTTPListenerARN returns the listener ARN if the protocol is HTTP.
+func (alb *ImportedALB) HTTPListenerARN() string {
+	for _, listener := range alb.Listeners {
+		if listener.Protocol == "HTTP" {
+			return listener.ARN
+		}
+	}
+	return ""
+}
+
+// HTTPSListenerARN returns the listener ARN if the protocol is HTTPS.
+func (alb *ImportedALB) HTTPSListenerARN() string {
+	for _, listener := range alb.Listeners {
+		if listener.Protocol == "HTTPS" {
+			return listener.ARN
+		}
 	}
 	return ""
 }
@@ -907,24 +989,35 @@ func (t *Template) parseWkld(name, wkldDirName string, data interface{}, options
 func withSvcParsingFuncs() ParseOption {
 	return func(t *template.Template) *template.Template {
 		return t.Funcs(map[string]interface{}{
-			"toSnakeCase":          ToSnakeCaseFunc,
-			"hasSecrets":           hasSecrets,
-			"fmtSlice":             FmtSliceFunc,
-			"quoteSlice":           QuoteSliceFunc,
-			"quote":                strconv.Quote,
-			"randomUUID":           randomUUIDFunc,
-			"jsonMountPoints":      generateMountPointJSON,
-			"jsonSNSTopics":        generateSNSJSON,
-			"jsonQueueURIs":        generateQueueURIJSON,
-			"envControllerParams":  envControllerParameters,
-			"logicalIDSafe":        StripNonAlphaNumFunc,
-			"wordSeries":           english.WordSeries,
-			"pluralWord":           english.PluralWord,
-			"contains":             contains,
-			"requiresVPCConnector": requiresVPCConnector,
-			"strconvUint16":        StrconvUint16,
+			"toSnakeCase":             ToSnakeCaseFunc,
+			"hasSecrets":              hasSecrets,
+			"fmtSlice":                FmtSliceFunc,
+			"quoteSlice":              QuoteSliceFunc,
+			"quote":                   strconv.Quote,
+			"randomUUID":              randomUUIDFunc,
+			"jsonMountPoints":         generateMountPointJSON,
+			"jsonSNSTopics":           generateSNSJSON,
+			"jsonQueueURIs":           generateQueueURIJSON,
+			"envControllerParams":     envControllerParameters,
+			"logicalIDSafe":           StripNonAlphaNumFunc,
+			"wordSeries":              english.WordSeries,
+			"pluralWord":              english.PluralWord,
+			"contains":                slices.Contains[[]string, string],
+			"requiresVPCConnector":    requiresVPCConnector,
+			"strconvUint16":           StrconvUint16,
+			"truncateWithHashPadding": truncateWithHashPadding,
 		})
 	}
+}
+
+func truncateWithHashPadding(s string, max, paddingLength int) string {
+	if len(s) <= max {
+		return s
+	}
+	h := sha256.New()
+	h.Write([]byte(s))
+	hash := fmt.Sprintf("%x", h.Sum(nil))
+	return s[:max] + hash[:paddingLength]
 }
 
 func hasSecrets(opts WorkloadOpts) bool {
@@ -949,10 +1042,12 @@ func randomUUIDFunc() (string, error) {
 func envControllerParameters(o WorkloadOpts) []string {
 	parameters := []string{}
 	if o.WorkloadType == "Load Balanced Web Service" {
-		if o.ALBEnabled {
-			parameters = append(parameters, "ALBWorkloads,")
+		if o.ImportedALB == nil {
+			if o.ALBEnabled {
+				parameters = append(parameters, "ALBWorkloads,")
+			}
+			parameters = append(parameters, "Aliases,") // YAML needs the comma separator; resolved in EnvContr.
 		}
-		parameters = append(parameters, "Aliases,") // YAML needs the comma separator; resolved in EnvContr.
 	}
 	if o.WorkloadType == "Backend Service" {
 		if o.ALBEnabled {
@@ -978,15 +1073,6 @@ func requiresVPCConnector(o WorkloadOpts) bool {
 		return false
 	}
 	return len(o.Network.SubnetIDs) > 0 || o.Network.SubnetsType != ""
-}
-
-func contains(list []string, s string) bool {
-	for _, item := range list {
-		if item == s {
-			return true
-		}
-	}
-	return false
 }
 
 // ARN determines the arn for a topic using the SNSTopic name and account information

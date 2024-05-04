@@ -141,7 +141,9 @@ func (d *EnvDescriber) Manifest() ([]byte, error) {
 	}
 
 	if metadata.Manifest != "" {
-		return []byte(strings.TrimSpace(metadata.Manifest)), nil
+		// replace `\\n` with '\n'
+		m := strings.TrimSpace(strings.ReplaceAll(metadata.Manifest, "\\n", "\n"))
+		return []byte(m), nil
 	}
 	// Otherwise, the Manifest wasn't written into the CloudFormation template, we'll convert the config in SSM.
 	mft := manifest.FromEnvConfig(d.env, template.New())

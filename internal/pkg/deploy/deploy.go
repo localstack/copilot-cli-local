@@ -6,6 +6,7 @@ package deploy
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/aws/aws-sdk-go/aws/arn"
@@ -156,6 +157,11 @@ func (s *Store) ListDeployedJobs(appName string, envName string) ([]string, erro
 	return s.listDeployedWorkloads(appName, envName, manifestinfo.JobTypes())
 }
 
+// ListDeployedWorkloads returns the names of deployed workloads in an environment.
+func (s *Store) ListDeployedWorkloads(appName string, envName string) ([]string, error) {
+	return s.listDeployedWorkloads(appName, envName, manifestinfo.WorkloadTypes())
+}
+
 func (s *Store) listDeployedWorkloads(appName string, envName string, workloadType []string) ([]string, error) {
 	allWorkloads, err := s.configStore.ListWorkloads(appName)
 	if err != nil {
@@ -185,7 +191,7 @@ func (s *Store) listDeployedWorkloads(appName string, envName string, workloadTy
 	var wklds []string
 	for _, resource := range resources {
 		name := resource.Tags[ServiceTagKey]
-		if name == "" || contains(name, wklds) {
+		if name == "" || slices.Contains(wklds, name) {
 			// To avoid listing duplicate service entry in a case when service has addons stack.
 			continue
 		}
@@ -238,15 +244,6 @@ func (s *Store) ListSNSTopics(appName string, envName string) ([]Topic, error) {
 	}
 
 	return out, nil
-}
-
-func contains(name string, names []string) bool {
-	for _, n := range names {
-		if name == n {
-			return true
-		}
-	}
-	return false
 }
 
 type result struct {
@@ -304,15 +301,16 @@ func (s *Store) ListEnvironmentsDeployedTo(appName string, svcName string) ([]st
 
 // IsServiceDeployed returns whether a service is deployed in an environment or not.
 func (s *Store) IsServiceDeployed(appName string, envName string, svcName string) (bool, error) {
-	return s.isWorkloadDeployed(appName, envName, svcName)
+	return s.IsWorkloadDeployed(appName, envName, svcName)
 }
 
 // IsJobDeployed returns whether a job is deployed in an environment or not by checking for a state machine.
 func (s *Store) IsJobDeployed(appName, envName, jobName string) (bool, error) {
-	return s.isWorkloadDeployed(appName, envName, jobName)
+	return s.IsWorkloadDeployed(appName, envName, jobName)
 }
 
-func (s *Store) isWorkloadDeployed(appName, envName, name string) (bool, error) {
+// IsWorkloadDeployed returns whether a workload is deployed in an environment or not.
+func (s *Store) IsWorkloadDeployed(appName, envName, name string) (bool, error) {
 	rgClient, err := s.newRgClientFromIDs(appName, envName)
 	if err != nil {
 		return false, err

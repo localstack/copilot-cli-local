@@ -161,12 +161,12 @@ type TaskConfig struct {
 
 // Variable represents an identifier for the value of an environment variable.
 type Variable struct {
-	stringOrFromCFN
+	StringOrFromCFN
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler (v3) interface to override the default YAML unmarshalling logic.
 func (v *Variable) UnmarshalYAML(value *yaml.Node) error {
-	if err := v.stringOrFromCFN.UnmarshalYAML(value); err != nil {
+	if err := v.StringOrFromCFN.UnmarshalYAML(value); err != nil {
 		return fmt.Errorf(`unmarshal "variables": %w`, err)
 	}
 	return nil
@@ -208,7 +208,7 @@ func (t TaskConfig) IsARM() bool {
 
 // Secret represents an identifier for sensitive data stored in either SSM or SecretsManager.
 type Secret struct {
-	from               stringOrFromCFN      // SSM Parameter name or ARN to a secret or secret ARN imported from another CloudFormation stack.
+	from               StringOrFromCFN      // SSM Parameter name or ARN to a secret or secret ARN imported from another CloudFormation stack.
 	fromSecretsManager secretsManagerSecret // Conveniently fetch from a secretsmanager secret name instead of ARN.
 }
 
@@ -437,4 +437,29 @@ func buildArgs(contextDir string, buildArgs map[string]*DockerBuildArgs, sc map[
 		}
 	}
 	return buildArgs, nil
+}
+
+// ContainerDependency represents order of container startup and shutdown.
+// Also indicates if a container is marked as essential or not.
+type ContainerDependency struct {
+	IsEssential bool
+	DependsOn   DependsOn
+}
+
+func containerDependencies(name string, img Image, lc Logging, sc map[string]*SidecarConfig) map[string]ContainerDependency {
+	containerDependencies := make(map[string]ContainerDependency)
+	containerDependencies[name] = ContainerDependency{
+		DependsOn:   img.DependsOn,
+		IsEssential: true,
+	}
+	if !lc.IsEmpty() {
+		containerDependencies[FirelensContainerName] = ContainerDependency{}
+	}
+	for name, config := range sc {
+		containerDependencies[name] = ContainerDependency{
+			DependsOn:   config.DependsOn,
+			IsEssential: config.Essential == nil || aws.BoolValue(config.Essential),
+		}
+	}
+	return containerDependencies
 }

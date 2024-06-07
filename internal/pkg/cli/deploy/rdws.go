@@ -25,6 +25,7 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 )
 
 var rdwsAliasUsedWithoutDomainFriendlyText = fmt.Sprintf("To use %s, your application must be associated with a domain: %s.\n",
@@ -79,7 +80,7 @@ func (rdwsDeployer) IsServiceAvailableInRegion(region string) (bool, error) {
 
 // UploadArtifacts uploads the deployment artifacts such as the container image, custom resources, addons and env files.
 func (d *rdwsDeployer) UploadArtifacts() (*UploadArtifactsOutput, error) {
-	return d.uploadArtifacts(d.uploadContainerImages, d.uploadArtifactsToS3, d.uploadCustomResources)
+	return d.uploadArtifacts(d.buildAndPushContainerImages, d.uploadArtifactsToS3, d.uploadCustomResources)
 }
 
 type rdwsDeployOutput struct {
@@ -151,6 +152,7 @@ func (d *rdwsDeployer) stackConfiguration(in *StackRuntimeConfiguration) (*rdwsS
 			Manifest:           d.rdwsMft,
 			RawManifest:        d.rawMft,
 			ArtifactBucketName: d.resources.S3Bucket,
+			ArtifactKey:        d.resources.KMSKeyARN,
 			RuntimeConfig:      *rc,
 			Addons:             d.addons,
 		})
@@ -189,7 +191,7 @@ func validateRDSvcAliasAndAppVersion(svcName, alias, envName string, app *config
 	if alias == "" {
 		return nil
 	}
-	if err := validateMinAppVersion(app.Name, svcName, appVersionGetter, deploy.AliasLeastAppTemplateVersion); err != nil {
+	if err := validateMinAppVersion(app.Name, svcName, appVersionGetter, version.AppTemplateMinAlias); err != nil {
 		return fmt.Errorf("alias not supported: %w", err)
 	}
 	// Alias should be within root hosted zone.

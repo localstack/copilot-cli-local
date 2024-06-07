@@ -12,9 +12,18 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/cli/mocks"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 )
+
+type versionGetterDouble struct {
+	VersionFn func() (string, error)
+}
+
+func (d *versionGetterDouble) Version() (string, error) {
+	return d.VersionFn()
+}
 
 type appUpgradeMocks struct {
 	storeSvc *mocks.Mockstore
@@ -153,42 +162,54 @@ func TestAppUpgradeOpts_Ask(t *testing.T) {
 }
 
 func TestAppUpgradeOpts_Execute(t *testing.T) {
+	const mockTemplateVersion = "v1.29.0"
+	versionGetterLegacy := func(string) (versionGetter, error) {
+		return &versionGetterDouble{
+			VersionFn: func() (string, error) {
+				return version.LegacyAppTemplate, nil
+			},
+		}, nil
+	}
+
 	testCases := map[string]struct {
 		given     func(ctrl *gomock.Controller) *appUpgradeOpts
 		wantedErr error
 	}{
 		"should return error if fail to get template version": {
 			given: func(ctrl *gomock.Controller) *appUpgradeOpts {
-				mockVersionGetter := mocks.NewMockversionGetter(ctrl)
-				mockVersionGetter.EXPECT().Version().Return("", errors.New("some error"))
-
 				return &appUpgradeOpts{
 					appUpgradeVars: appUpgradeVars{
 						name: "phonetool",
 					},
-					versionGetter: mockVersionGetter,
+					newVersionGetter: func(string) (versionGetter, error) {
+						return &versionGetterDouble{
+							VersionFn: func() (string, error) {
+								return "", errors.New("some error")
+							},
+						}, nil
+					},
 				}
 			},
 			wantedErr: fmt.Errorf("get template version of application phonetool: some error"),
 		},
 		"should return if app is up-to-date": {
 			given: func(ctrl *gomock.Controller) *appUpgradeOpts {
-				mockVersionGetter := mocks.NewMockversionGetter(ctrl)
-				mockVersionGetter.EXPECT().Version().Return(deploy.LatestAppTemplateVersion, nil)
-
 				return &appUpgradeOpts{
 					appUpgradeVars: appUpgradeVars{
 						name: "phonetool",
 					},
-					versionGetter: mockVersionGetter,
+					newVersionGetter: func(string) (versionGetter, error) {
+						return &versionGetterDouble{
+							VersionFn: func() (string, error) {
+								return mockTemplateVersion, nil
+							},
+						}, nil
+					},
 				}
 			},
 		},
 		"should return error if fail to get application": {
 			given: func(ctrl *gomock.Controller) *appUpgradeOpts {
-				mockVersionGetter := mocks.NewMockversionGetter(ctrl)
-				mockVersionGetter.EXPECT().Version().Return(deploy.LegacyAppTemplateVersion, nil)
-
 				mockStore := mocks.NewMockstore(ctrl)
 				mockStore.EXPECT().GetApplication("phonetool").Return(nil, errors.New("some error"))
 
@@ -196,21 +217,14 @@ func TestAppUpgradeOpts_Execute(t *testing.T) {
 					appUpgradeVars: appUpgradeVars{
 						name: "phonetool",
 					},
-					versionGetter: mockVersionGetter,
-					store:         mockStore,
+					newVersionGetter: versionGetterLegacy,
+					store:            mockStore,
 				}
 			},
 			wantedErr: fmt.Errorf("get application phonetool: some error"),
 		},
 		"should return error if fail to get identity": {
 			given: func(ctrl *gomock.Controller) *appUpgradeOpts {
-				mockVersionGetter := mocks.NewMockversionGetter(ctrl)
-				mockVersionGetter.EXPECT().Version().Return(deploy.LegacyAppTemplateVersion, nil)
-
-				mockProg := mocks.NewMockprogress(ctrl)
-				mockProg.EXPECT().Start(gomock.Any())
-				mockProg.EXPECT().Stop(gomock.Any())
-
 				mockIdentity := mocks.NewMockidentityService(ctrl)
 				mockIdentity.EXPECT().Get().Return(identity.Caller{}, errors.New("some error"))
 
@@ -221,23 +235,15 @@ func TestAppUpgradeOpts_Execute(t *testing.T) {
 					appUpgradeVars: appUpgradeVars{
 						name: "phonetool",
 					},
-					versionGetter: mockVersionGetter,
-					identity:      mockIdentity,
-					store:         mockStore,
-					prog:          mockProg,
+					newVersionGetter: versionGetterLegacy,
+					identity:         mockIdentity,
+					store:            mockStore,
 				}
 			},
 			wantedErr: fmt.Errorf("get identity: some error"),
 		},
 		"should return error if fail to get hostedzone id": {
 			given: func(ctrl *gomock.Controller) *appUpgradeOpts {
-				mockVersionGetter := mocks.NewMockversionGetter(ctrl)
-				mockVersionGetter.EXPECT().Version().Return(deploy.LegacyAppTemplateVersion, nil)
-
-				mockProg := mocks.NewMockprogress(ctrl)
-				mockProg.EXPECT().Start(gomock.Any())
-				mockProg.EXPECT().Stop(gomock.Any())
-
 				mockIdentity := mocks.NewMockidentityService(ctrl)
 				mockIdentity.EXPECT().Get().Return(identity.Caller{Account: "1234"}, nil)
 
@@ -248,30 +254,22 @@ func TestAppUpgradeOpts_Execute(t *testing.T) {
 				}, nil)
 
 				mockRoute53 := mocks.NewMockdomainHostedZoneGetter(ctrl)
-				mockRoute53.EXPECT().DomainHostedZoneID("foobar.com").Return("", errors.New("some error"))
+				mockRoute53.EXPECT().PublicDomainHostedZoneID("foobar.com").Return("", errors.New("some error"))
 
 				return &appUpgradeOpts{
 					appUpgradeVars: appUpgradeVars{
 						name: "phonetool",
 					},
-					versionGetter: mockVersionGetter,
-					identity:      mockIdentity,
-					store:         mockStore,
-					prog:          mockProg,
-					route53:       mockRoute53,
+					newVersionGetter: versionGetterLegacy,
+					identity:         mockIdentity,
+					store:            mockStore,
+					route53:          mockRoute53,
 				}
 			},
 			wantedErr: fmt.Errorf("get hosted zone ID for domain foobar.com: some error"),
 		},
 		"should return error if fail to upgrade application": {
 			given: func(ctrl *gomock.Controller) *appUpgradeOpts {
-				mockVersionGetter := mocks.NewMockversionGetter(ctrl)
-				mockVersionGetter.EXPECT().Version().Return(deploy.LegacyAppTemplateVersion, nil)
-
-				mockProg := mocks.NewMockprogress(ctrl)
-				mockProg.EXPECT().Start(gomock.Any())
-				mockProg.EXPECT().Stop(gomock.Any())
-
 				mockIdentity := mocks.NewMockidentityService(ctrl)
 				mockIdentity.EXPECT().Get().Return(identity.Caller{Account: "1234"}, nil)
 
@@ -286,24 +284,16 @@ func TestAppUpgradeOpts_Execute(t *testing.T) {
 					appUpgradeVars: appUpgradeVars{
 						name: "phonetool",
 					},
-					versionGetter: mockVersionGetter,
-					identity:      mockIdentity,
-					store:         mockStore,
-					prog:          mockProg,
-					upgrader:      mockUpgrader,
+					newVersionGetter: versionGetterLegacy,
+					identity:         mockIdentity,
+					store:            mockStore,
+					upgrader:         mockUpgrader,
 				}
 			},
-			wantedErr: fmt.Errorf("upgrade application phonetool from version v0.0.0 to version %s: some error", deploy.LatestAppTemplateVersion),
+			wantedErr: fmt.Errorf("upgrade application phonetool from version v0.0.0 to version %s: some error", mockTemplateVersion),
 		},
 		"success": {
 			given: func(ctrl *gomock.Controller) *appUpgradeOpts {
-				mockVersionGetter := mocks.NewMockversionGetter(ctrl)
-				mockVersionGetter.EXPECT().Version().Return(deploy.LegacyAppTemplateVersion, nil)
-
-				mockProg := mocks.NewMockprogress(ctrl)
-				mockProg.EXPECT().Start(gomock.Any())
-				mockProg.EXPECT().Stop(gomock.Any())
-
 				mockIdentity := mocks.NewMockidentityService(ctrl)
 				mockIdentity.EXPECT().Get().Return(identity.Caller{Account: "1234"}, nil)
 
@@ -319,7 +309,7 @@ func TestAppUpgradeOpts_Execute(t *testing.T) {
 				}).Return(nil)
 
 				mockRoute53 := mocks.NewMockdomainHostedZoneGetter(ctrl)
-				mockRoute53.EXPECT().DomainHostedZoneID("hello.com").Return("2klfqok3", nil)
+				mockRoute53.EXPECT().PublicDomainHostedZoneID("hello.com").Return("2klfqok3", nil)
 
 				mockUpgrader := mocks.NewMockappUpgrader(ctrl)
 				mockUpgrader.EXPECT().UpgradeApplication(&deploy.CreateAppInput{
@@ -327,19 +317,18 @@ func TestAppUpgradeOpts_Execute(t *testing.T) {
 					AccountID:          "1234",
 					DomainName:         "hello.com",
 					DomainHostedZoneID: "2klfqok3",
-					Version:            deploy.LatestAppTemplateVersion,
+					Version:            mockTemplateVersion,
 				}).Return(nil)
 
 				return &appUpgradeOpts{
 					appUpgradeVars: appUpgradeVars{
 						name: "phonetool",
 					},
-					versionGetter: mockVersionGetter,
-					identity:      mockIdentity,
-					store:         mockStore,
-					prog:          mockProg,
-					upgrader:      mockUpgrader,
-					route53:       mockRoute53,
+					newVersionGetter: versionGetterLegacy,
+					identity:         mockIdentity,
+					store:            mockStore,
+					upgrader:         mockUpgrader,
+					route53:          mockRoute53,
 				}
 			},
 		},
@@ -350,6 +339,7 @@ func TestAppUpgradeOpts_Execute(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 			opts := tc.given(ctrl)
+			opts.templateVersion = mockTemplateVersion
 
 			err := opts.Execute()
 

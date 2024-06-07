@@ -5,6 +5,7 @@ package deploy
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -80,7 +81,7 @@ func workerCustomResources(fs template.Reader) ([]*customresource.CustomResource
 
 // UploadArtifacts uploads the deployment artifacts such as the container image, custom resources, addons and env files.
 func (d *workerSvcDeployer) UploadArtifacts() (*UploadArtifactsOutput, error) {
-	return d.uploadArtifacts(d.uploadContainerImages, d.uploadArtifactsToS3, d.uploadCustomResources)
+	return d.uploadArtifacts(d.buildAndPushContainerImages, d.uploadArtifactsToS3, d.uploadCustomResources)
 }
 
 type workerSvcDeployOutput struct {
@@ -185,6 +186,7 @@ func (d *workerSvcDeployer) stackConfiguration(in *StackRuntimeConfiguration) (*
 			Manifest:           d.wsMft,
 			RawManifest:        d.rawMft,
 			ArtifactBucketName: d.resources.S3Bucket,
+			ArtifactKey:        d.resources.KMSKeyARN,
 			RuntimeConfig:      *rc,
 			Addons:             d.addons,
 		})
@@ -216,18 +218,9 @@ func validateTopicsExist(subscriptions []manifest.TopicSubscription, topicARNs [
 
 	for _, ts := range subscriptions {
 		topicName := fmt.Sprintf(resourceNameFormat, app, env, aws.StringValue(ts.Service), aws.StringValue(ts.Name))
-		if !contains(topicName, validTopicResources) {
+		if !slices.Contains(validTopicResources, topicName) {
 			return fmt.Errorf(fmtErrTopicSubscriptionNotAllowed, topicName, env)
 		}
 	}
 	return nil
-}
-
-func contains(s string, items []string) bool {
-	for _, item := range items {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }

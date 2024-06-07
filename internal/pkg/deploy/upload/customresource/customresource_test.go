@@ -96,8 +96,8 @@ func TestLBWS(t *testing.T) {
 			"custom-resources/wkld-custom-domain.js": {
 				Buffer: bytes.NewBufferString("service-level custom domain"),
 			},
-			"custom-resources/nlb-cert-validator.js": {
-				Buffer: bytes.NewBufferString("nlb cert"),
+			"custom-resources/wkld-cert-validator.js": {
+				Buffer: bytes.NewBufferString("service-level cert"),
 			},
 		},
 	}
@@ -106,7 +106,7 @@ func TestLBWS(t *testing.T) {
 		"EnvControllerFunction":       "manual/scripts/custom-resources/envcontrollerfunction/72297cacaeab3a267e371c17ea3f0235905b0da51410eb31c10f7c66ba944044.zip",
 		"RulePriorityFunction":        "manual/scripts/custom-resources/rulepriorityfunction/1385d258950a50faf4b5cd7deeecbc4bcc79a0d41d631e3977cffa0332e6f0c6.zip",
 		"NLBCustomDomainFunction":     "manual/scripts/custom-resources/nlbcustomdomainfunction/ac1c96e7f0823f3167b4e74c8b286ffe8f9d43279dc232d9478837327e57905e.zip",
-		"NLBCertValidatorFunction":    "manual/scripts/custom-resources/nlbcertvalidatorfunction/3b9f56301b50779e09a3495a6d7eadc42b4401f265d4cfb359543c1ad3f21769.zip",
+		"NLBCertValidatorFunction":    "manual/scripts/custom-resources/nlbcertvalidatorfunction/41aeafc64f18f82c452432a214ae83d8c8de4aba2d5df6a752b7e9a2c86833f1.zip",
 	}
 
 	// WHEN
@@ -257,18 +257,18 @@ func TestStaticSite(t *testing.T) {
 			"custom-resources/trigger-state-machine.js": {
 				Buffer: bytes.NewBufferString("trigger state machine"),
 			},
-			"custom-resources/copy-assets.js": {
-				Buffer: bytes.NewBufferString("copy assets"),
-			},
 			"custom-resources/wkld-custom-domain.js": {
-				Buffer: bytes.NewBufferString("add A record for CloudFront"),
+				Buffer: bytes.NewBufferString("service-level custom domain"),
+			},
+			"custom-resources/wkld-cert-validator.js": {
+				Buffer: bytes.NewBufferString("service-level cert"),
 			},
 		},
 	}
 	fakePaths := map[string]string{
-		"TriggerStateMachineFunction": "manual/scripts/custom-resources/triggerstatemachinefunction/edfa40b595a5a4a6d24bfb7ad6e173560a29b7d720651ccc9c87eda76b93c7dd.zip",
-		"CopyAssetsFunction":          "manual/scripts/custom-resources/copyassetsfunction/b9fc2f284cfb699b7c63efaac618d7678372792aa020141fa91053092977976d.zip",
-		"CustomDomainFunction":        "manual/scripts/custom-resources/customdomainfunction/c8c78ed9e73964c2facfa0bceb5ed6227172fd98057c53c137296fed81975672.zip",
+		"TriggerStateMachineFunction":   "manual/scripts/custom-resources/triggerstatemachinefunction/edfa40b595a5a4a6d24bfb7ad6e173560a29b7d720651ccc9c87eda76b93c7dd.zip",
+		"CustomDomainFunction":          "manual/scripts/custom-resources/customdomainfunction/ac1c96e7f0823f3167b4e74c8b286ffe8f9d43279dc232d9478837327e57905e.zip",
+		"CertificateValidationFunction": "manual/scripts/custom-resources/certificatevalidationfunction/41aeafc64f18f82c452432a214ae83d8c8de4aba2d5df6a752b7e9a2c86833f1.zip",
 	}
 
 	// WHEN
@@ -283,7 +283,7 @@ func TestStaticSite(t *testing.T) {
 		actualFnNames[i] = cr.Name()
 	}
 	require.ElementsMatch(t,
-		[]string{"TriggerStateMachineFunction", "CopyAssetsFunction", "CustomDomainFunction"},
+		[]string{"TriggerStateMachineFunction", "CustomDomainFunction", "CertificateValidationFunction"},
 		actualFnNames, "function names must match")
 
 	// ensure the zip files contain an index.js file.
@@ -369,6 +369,9 @@ func TestEnv(t *testing.T) {
 			"custom-resources/unique-json-values.js": {
 				Buffer: bytes.NewBufferString("unique json values"),
 			},
+			"custom-resources/bucket-cleaner.js": {
+				Buffer: bytes.NewBufferString("bucket cleaner"),
+			},
 		},
 	}
 	fakePaths := map[string]string{
@@ -377,6 +380,7 @@ func TestEnv(t *testing.T) {
 		"DNSDelegationFunction":         "manual/scripts/custom-resources/dnsdelegationfunction/17ec5f580cdb9c1d7c6b5b91decee031592547629a6bfed7cd33b9229f61ab19.zip",
 		"CertificateReplicatorFunction": "manual/scripts/custom-resources/certificatereplicatorfunction/647f83437e4736ddf2915784e13d023a7d342d162ffb42a9eec3d7c842072030.zip",
 		"UniqueJSONValuesFunction":      "manual/scripts/custom-resources/uniquejsonvaluesfunction/68c7ace14491d82ac4bb5ad81b3371743d669a26638f419265c18e9bdfca8dd1.zip",
+		"BucketCleanerFunction":         "manual/scripts/custom-resources/bucketcleanerfunction/44c1eb88b269251952c25a0e17cd2c166d1de3f2340d60ad2d6b3899ceb058d9.zip",
 	}
 
 	// WHEN
@@ -384,14 +388,14 @@ func TestEnv(t *testing.T) {
 
 	// THEN
 	require.NoError(t, err)
-	require.Equal(t, fakeFS.matchCount, 5, "expected path calls do not match")
+	require.Equal(t, fakeFS.matchCount, 6, "expected path calls do not match")
 
 	actualFnNames := make([]string, len(crs))
 	for i, cr := range crs {
 		actualFnNames[i] = cr.Name()
 	}
 	require.ElementsMatch(t,
-		[]string{"CertificateValidationFunction", "CustomDomainFunction", "DNSDelegationFunction", "CertificateReplicatorFunction", "UniqueJSONValuesFunction"},
+		[]string{"CertificateValidationFunction", "CustomDomainFunction", "DNSDelegationFunction", "CertificateReplicatorFunction", "UniqueJSONValuesFunction", "BucketCleanerFunction"},
 		actualFnNames, "function names must match")
 
 	// ensure the zip files contain an index.js file.

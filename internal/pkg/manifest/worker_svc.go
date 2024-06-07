@@ -5,6 +5,7 @@ package manifest
 
 import (
 	"errors"
+	"maps"
 	"strings"
 	"time"
 
@@ -31,6 +32,11 @@ type WorkerService struct {
 	// Use *WorkerServiceConfig because of https://github.com/imdario/mergo/issues/146
 	Environments map[string]*WorkerServiceConfig `yaml:",flow"`
 	parser       template.Parser
+}
+
+// Dockerfile returns the relative path of the Dockerfile in the manifest.
+func (s *WorkerService) Dockerfile() string {
+	return s.ImageConfig.Image.dockerfilePath()
 }
 
 // Publish returns the list of topics where notifications can be published.
@@ -292,6 +298,12 @@ func (s *WorkerService) EnvFiles() map[string]string {
 	return envFiles(s.Name, s.TaskConfig, s.Logging, s.Sidecars)
 }
 
+// ContainerDependencies returns a map of ContainerDependency objects for the WorkerService
+// including dependencies for its main container, any logging sidecar, and additional sidecars.
+func (s *WorkerService) ContainerDependencies() map[string]ContainerDependency {
+	return containerDependencies(aws.StringValue(s.Name), s.ImageConfig.Image, s.Logging, s.Sidecars)
+}
+
 // Subscriptions returns a list of TopicSubscriotion objects which represent the SNS topics the service
 // receives messages from. This method also appends ".fifo" to the topics and returns a new set of subs.
 func (s *WorkerService) Subscriptions() []TopicSubscription {
@@ -376,15 +388,15 @@ func newDefaultWorkerService() *WorkerService {
 
 // ExposedPorts returns all the ports that are sidecar container ports available to receive traffic.
 func (ws *WorkerService) ExposedPorts() (ExposedPortsIndex, error) {
-	var exposedPorts []ExposedPort
+	exposedPorts := make(map[uint16]ExposedPort)
 	for name, sidecar := range ws.Sidecars {
-		out, err := sidecar.exposedPorts(name)
+		newExposedPorts, err := sidecar.exposePorts(exposedPorts, name)
 		if err != nil {
 			return ExposedPortsIndex{}, err
 		}
-		exposedPorts = append(exposedPorts, out...)
+		maps.Copy(exposedPorts, newExposedPorts)
 	}
-	portsForContainer, containerForPort := prepareParsedExposedPortsMap(sortExposedPorts(exposedPorts))
+	portsForContainer, containerForPort := prepareParsedExposedPortsMap(exposedPorts)
 	return ExposedPortsIndex{
 		PortsForContainer: portsForContainer,
 		ContainerForPort:  containerForPort,

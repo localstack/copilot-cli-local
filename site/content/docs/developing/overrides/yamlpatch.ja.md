@@ -14,7 +14,7 @@
 
 `copilot [noun] override` コマンドを実行すると、YAML パッチを使って CloudFormation テンプレートを拡張できます。
 例えば、`copilot svc override` コマンドにより、 Load Balanced Web Service のテンプレートを更新します。
-コマンドは、以下の様な構造で、`copilot/[name]/override` ディレクトリ配下にサンプルの `cfn.patches.yml` ファイルを作成します。
+コマンドは、以下の様な構造で、`copilot/[name]/overrides` ディレクトリ配下にサンプルの `cfn.patches.yml` ファイルを作成します。
 
 ## どの様な仕組みでしょうか？
 
@@ -56,7 +56,7 @@
 
 既存リソースに対して、新しいプロパティを追加する場合:
 
-```yaml 
+```yaml
 - op: add
   path: /Resources/LogGroup/Properties/Tags
   value:
@@ -78,12 +78,12 @@
 - op: add
   path: /Resources/TaskRole/Properties/Policies/-
   value:
+    PolicyName: DynamoDBReader
     PolicyDocument:
-      PolicyName: DynamoDBReader
       Version: "2012-10-17"
       Statement:
         - Effect: Allow
-          Action: 
+          Action:
             - dynamodb:Get*
           Resource: '*'
 ```

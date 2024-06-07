@@ -47,6 +47,24 @@ const (
 	envOutputManagerRoleKey      = "EnvironmentManagerRoleARN"
 )
 
+// Cloudformation stack tag keys.
+const (
+	StackNameTagKey = "aws:cloudformation:stack-name"
+	LogicalIDTagKey = "aws:cloudformation:logical-id"
+)
+
+// Environment managed S3 buckets.
+const (
+	ELBAccessLogsBucketLogicalID = "ELBAccessLogsBucket"
+)
+
+// Slice of environment managed S3 bucket IDs.
+var (
+	EnvManagedS3BucketLogicalIds = []string{
+		ELBAccessLogsBucketLogicalID,
+	}
+)
+
 const (
 	// DefaultVPCCIDR is the default CIDR used for a manged VPC.
 	DefaultVPCCIDR = "10.0.0.0/16"
@@ -94,7 +112,7 @@ type EnvConfig struct {
 	InternalLBSourceIPs []string              // Optional configuration to specify private security group ingress based on customer given source IPs.
 	Telemetry           *config.Telemetry     // Optional observability and monitoring configuration.
 	Mft                 *manifest.Environment // Unmarshaled and interpolated manifest object.
-	RawMft              []byte                // Content of the environment manifest without any modifications.
+	RawMft              string                // Content of the environment manifest with env var interpolation only.
 	ForceUpdate         bool
 }
 
@@ -197,8 +215,7 @@ func (e *Env) Template() (string, error) {
 		Telemetry:            e.telemetryConfig(),
 		CDNConfig:            e.cdnConfig(),
 
-		Version:            e.in.Version,
-		LatestVersion:      deploy.LatestEnvTemplateVersion,
+		LatestVersion:      e.in.Version,
 		SerializedManifest: string(e.in.RawMft),
 		ForceUpdateID:      forceUpdateID,
 		DelegateDNS:        e.in.App.Domain != "",

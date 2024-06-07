@@ -52,7 +52,7 @@ type appResourcesGetter interface {
 }
 
 type environmentDeployer interface {
-	UpdateAndRenderEnvironment(conf deploycfn.StackConfiguration, bucketARN string, opts ...cloudformation.StackOption) error
+	UpdateAndRenderEnvironment(conf deploycfn.StackConfiguration, bucketARN string, detach bool, opts ...cloudformation.StackOption) error
 	DeployedEnvironmentParameters(app, env string) ([]*awscfn.Parameter, error)
 	ForceUpdateOutputID(app, env string) (string, error)
 }
@@ -78,11 +78,6 @@ type stackDescriber interface {
 	Resources() ([]*stack.Resource, error)
 }
 
-type addons struct {
-	stack stackBuilder
-	err   error
-}
-
 type envDeployer struct {
 	app *config.Application
 	env *config.Environment
@@ -103,13 +98,11 @@ type envDeployer struct {
 	newServiceStackDescriber func(string) stackDescriber
 
 	// Dependencies for parsing addons.
-	ws              WorkspaceAddonsReaderPathGetter
-	parseAddonsOnce sync.Once
-	parseAddons     func() (stackBuilder, error)
+	ws          WorkspaceAddonsReaderPathGetter
+	parseAddons func() (stackBuilder, error)
 
 	// Cached variables.
 	appRegionalResources *cfnstack.AppRegionalResources
-	addons               addons
 }
 
 // NewEnvDeployerInput contains information needed to construct an environment deployer.
@@ -177,14 +170,10 @@ func NewEnvDeployer(in *NewEnvDeployerInput) (*envDeployer, error) {
 		newServiceStackDescriber: func(svc string) stackDescriber {
 			return stack.NewStackDescriber(cfnstack.NameForWorkload(in.App.Name, in.Env.Name, svc), envManagerSession)
 		},
-
+		parseAddons: sync.OnceValues(func() (stackBuilder, error) {
+			return addon.ParseFromEnv(in.Workspace)
+		}),
 		ws: in.Workspace,
-	}
-	deployer.parseAddons = func() (stackBuilder, error) {
-		deployer.parseAddonsOnce.Do(func() {
-			deployer.addons.stack, deployer.addons.err = addon.ParseFromEnv(deployer.ws)
-		})
-		return deployer.addons.stack, deployer.addons.err
 	}
 	return deployer, nil
 }
@@ -268,9 +257,11 @@ type DeployEnvironmentInput struct {
 	CustomResourcesURLs map[string]string
 	Manifest            *manifest.Environment
 	ForceNewUpdate      bool
-	RawManifest         []byte
+	RawManifest         string
 	PermissionsBoundary string
 	DisableRollback     bool
+	Version             string
+	Detach              bool
 }
 
 // GenerateCloudFormationTemplate returns the environment stack's template and parameter configuration.
@@ -329,7 +320,7 @@ func (d *envDeployer) DeployEnvironment(in *DeployEnvironmentInput) error {
 	if err != nil {
 		return err
 	}
-	return d.envDeployer.UpdateAndRenderEnvironment(stack, stackInput.ArtifactBucketARN, opts...)
+	return d.envDeployer.UpdateAndRenderEnvironment(stack, stackInput.ArtifactBucketARN, in.Detach, opts...)
 }
 
 func (d *envDeployer) getAppRegionalResources() (*cfnstack.AppRegionalResources, error) {
@@ -425,7 +416,7 @@ func (d *envDeployer) buildStackInput(in *DeployEnvironmentInput) (*cfnstack.Env
 		ForceUpdate:          in.ForceNewUpdate,
 		RawMft:               in.RawManifest,
 		PermissionsBoundary:  in.PermissionsBoundary,
-		Version:              deploy.LatestEnvTemplateVersion,
+		Version:              in.Version,
 	}, nil
 }
 

@@ -5,6 +5,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ssm"
@@ -48,7 +49,7 @@ func newOverrideWorkloadOpts(vars overrideWorkloadVars) (*overrideWorkloadOpts, 
 		return nil, fmt.Errorf("default session: %v", err)
 	}
 	cfgStore := config.NewSSMStore(identity.New(defaultSess), ssm.New(defaultSess), aws.StringValue(defaultSess.Config.Region))
-
+	vars.requiresEnv = true
 	prompt := prompt.New()
 	cmd := &overrideWorkloadOpts{
 		envName: vars.envName,
@@ -61,7 +62,7 @@ func newOverrideWorkloadOpts(vars overrideWorkloadVars) (*overrideWorkloadOpts, 
 			spinner:      termprogress.NewSpinner(log.DiagnosticWriter),
 		},
 		ws:       ws,
-		wsPrompt: selector.NewLocalWorkloadSelector(prompt, cfgStore, ws),
+		wsPrompt: selector.NewLocalWorkloadSelector(prompt, cfgStore, ws, selector.OnlyInitializedWorkloads),
 	}
 	return cmd, nil
 }
@@ -124,7 +125,7 @@ func (o *overrideWorkloadOpts) validateServiceName() error {
 	if err != nil {
 		return fmt.Errorf("list services in the workspace: %v", err)
 	}
-	if !contains(o.name, names) {
+	if !slices.Contains(names, o.name) {
 		return fmt.Errorf("service %q does not exist in the workspace", o.name)
 	}
 	return nil

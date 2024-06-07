@@ -11,13 +11,11 @@ batch:
 
 phases:
   install:
-    runtime-versions:
-      nodejs: 16
     commands:
-      - 'cd $HOME/.goenv && git pull --ff-only && cd -'
-      - 'goenv install 1.20.1'
-      - 'goenv global 1.20.1'
-      - 'go install github.com/onsi/ginkgo/v2/ginkgo@latest'
+      - "cd $HOME/.goenv && git pull --ff-only && cd -"
+      - "goenv install 1.21.1"
+      - "goenv global 1.21.1"
+      - "go install github.com/onsi/ginkgo/v2/ginkgo@latest"
   pre_build:
     commands:
       - printenv DOCKERHUB_TOKEN | docker login --username ${DOCKERHUB_USERNAME} --password-stdin
@@ -40,4 +38,4 @@ phases:
       - chmod +x ./copilot-linux-${FROM_VERSION}
       - export REGRESSION_TEST_FROM_PATH=../../copilot-linux-${FROM_VERSION}
       - export REGRESSION_TEST_TO_PATH=../../bin/local/copilot-linux-amd64
-      - cd regression/${TEST_SUITE} && ginkgo -v -r -noColor --timeout=1h30m
+      - cd regression/${TEST_SUITE} && ginkgo -v -r -noColor --timeout=1h30m --fail-fast

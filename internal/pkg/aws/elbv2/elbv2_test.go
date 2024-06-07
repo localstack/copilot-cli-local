@@ -144,33 +144,37 @@ func TestELBV2_TargetsHealth(t *testing.T) {
 }
 
 func TestELBV2_ListenerRuleHostHeaders(t *testing.T) {
-	mockARN := "mockListenerRuleARN"
+	mockARN1 := "mockListenerRuleARN1"
+	mockARN2 := "mockListenerRuleARN2"
 	testCases := map[string]struct {
-		setUpMock func(m *mocks.Mockapi)
-
+		setUpMock   func(m *mocks.Mockapi)
+		inARNs      []string
 		wanted      []string
 		wantedError error
 	}{
 		"fail to describe rules": {
+			inARNs: []string{mockARN1},
 			setUpMock: func(m *mocks.Mockapi) {
 				m.EXPECT().DescribeRules(&elbv2.DescribeRulesInput{
-					RuleArns: aws.StringSlice([]string{mockARN}),
+					RuleArns: aws.StringSlice([]string{mockARN1}),
 				}).Return(nil, errors.New("some error"))
 			},
-			wantedError: fmt.Errorf("get listener rule for mockListenerRuleARN: some error"),
+			wantedError: fmt.Errorf("get listener rule for mockListenerRuleARN1: some error"),
 		},
 		"cannot find listener rule": {
+			inARNs: []string{mockARN1},
 			setUpMock: func(m *mocks.Mockapi) {
 				m.EXPECT().DescribeRules(&elbv2.DescribeRulesInput{
-					RuleArns: aws.StringSlice([]string{mockARN}),
+					RuleArns: aws.StringSlice([]string{mockARN1}),
 				}).Return(&elbv2.DescribeRulesOutput{}, nil)
 			},
-			wantedError: fmt.Errorf("cannot find listener rule mockListenerRuleARN"),
+			wantedError: fmt.Errorf("cannot find listener rule mockListenerRuleARN1"),
 		},
 		"success": {
+			inARNs: []string{mockARN1},
 			setUpMock: func(m *mocks.Mockapi) {
 				m.EXPECT().DescribeRules(&elbv2.DescribeRulesInput{
-					RuleArns: aws.StringSlice([]string{mockARN}),
+					RuleArns: aws.StringSlice([]string{mockARN1}),
 				}).Return(&elbv2.DescribeRulesOutput{
 					Rules: []*elbv2.Rule{
 						{
@@ -193,6 +197,48 @@ func TestELBV2_ListenerRuleHostHeaders(t *testing.T) {
 			},
 			wanted: []string{"archer.com", "copilot.com"},
 		},
+		"success in case of multiple rules": {
+			inARNs: []string{mockARN1, mockARN2},
+			setUpMock: func(m *mocks.Mockapi) {
+				m.EXPECT().DescribeRules(&elbv2.DescribeRulesInput{
+					RuleArns: aws.StringSlice([]string{mockARN1, mockARN2}),
+				}).Return(&elbv2.DescribeRulesOutput{
+					Rules: []*elbv2.Rule{
+						{
+							Conditions: []*elbv2.RuleCondition{
+								{
+									Field:  aws.String("path-pattern"),
+									Values: []*string{aws.String("/*")},
+								},
+								{
+									Field:  aws.String("host-header"),
+									Values: aws.StringSlice([]string{"copilot.com", "archer.com"}),
+									HostHeaderConfig: &elbv2.HostHeaderConditionConfig{
+										Values: aws.StringSlice([]string{"copilot.com", "archer.com"}),
+									},
+								},
+							},
+						},
+						{
+							Conditions: []*elbv2.RuleCondition{
+								{
+									Field:  aws.String("path-pattern"),
+									Values: []*string{aws.String("/*")},
+								},
+								{
+									Field:  aws.String("host-header"),
+									Values: aws.StringSlice([]string{"v1.copilot.com", "v1.archer.com"}),
+									HostHeaderConfig: &elbv2.HostHeaderConditionConfig{
+										Values: aws.StringSlice([]string{"v1.copilot.com", "v1.archer.com"}),
+									},
+								},
+							},
+						},
+					},
+				}, nil)
+			},
+			wanted: []string{"archer.com", "copilot.com", "v1.archer.com", "v1.copilot.com"},
+		},
 	}
 
 	for name, tc := range testCases {
@@ -208,7 +254,7 @@ func TestELBV2_ListenerRuleHostHeaders(t *testing.T) {
 				client: mockAPI,
 			}
 
-			got, err := elbv2Client.ListenerRuleHostHeaders(mockARN)
+			got, err := elbv2Client.ListenerRulesHostHeaders(tc.inARNs)
 
 			if tc.wantedError != nil {
 				require.EqualError(t, tc.wantedError, err.Error())
@@ -362,6 +408,222 @@ func TestTargetHealth_HealthStatus(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got := tc.inTargetHealth.HealthStatus()
 			require.Equal(t, got, tc.wanted)
+		})
+	}
+}
+
+func TestELBV2_LoadBalancer(t *testing.T) {
+	mockOutput := &elbv2.DescribeLoadBalancersOutput{
+		LoadBalancers: []*elbv2.LoadBalancer{
+			{
+				LoadBalancerArn:       aws.String("mockLBARN"),
+				LoadBalancerName:      aws.String("mockLBName"),
+				DNSName:               aws.String("mockDNSName"),
+				Scheme:                aws.String("internet-facing"),
+				CanonicalHostedZoneId: aws.String("mockHostedZoneID"),
+				SecurityGroups:        aws.StringSlice([]string{"sg1", "sg2"}),
+			},
+		},
+	}
+	testCases := map[string]struct {
+		setUpMock func(m *mocks.Mockapi)
+		mockID    string
+
+		expectedErr string
+		expectedLB  *LoadBalancer
+	}{
+		"successfully return LB info from name": {
+			mockID: "loadBalancerName",
+			setUpMock: func(m *mocks.Mockapi) {
+				m.EXPECT().DescribeLoadBalancers(&elbv2.DescribeLoadBalancersInput{
+					Names: []*string{aws.String("loadBalancerName")},
+				}).Return(mockOutput, nil)
+				m.EXPECT().DescribeListeners(&elbv2.DescribeListenersInput{
+					LoadBalancerArn: aws.String("mockLBARN"),
+				}).Return(&elbv2.DescribeListenersOutput{
+					Listeners: []*elbv2.Listener{
+						{
+							ListenerArn: aws.String("mockListenerARN"),
+							Port:        aws.Int64(80),
+							Protocol:    aws.String("http"),
+						},
+					},
+					NextMarker: nil,
+				}, nil)
+			},
+
+			expectedLB: &LoadBalancer{
+				ARN:          "mockLBARN",
+				Name:         "mockLBName",
+				DNSName:      "mockDNSName",
+				Scheme:       "internet-facing",
+				HostedZoneID: "mockHostedZoneID",
+				Listeners: []Listener{
+					{
+						ARN:      "mockListenerARN",
+						Port:     80,
+						Protocol: "http",
+					},
+				},
+				SecurityGroups: []string{"sg1", "sg2"},
+			},
+		},
+		"successfully return LB info from ARN": {
+			mockID: "arn:aws:elasticloadbalancing:us-west-2:123594734248:loadbalancer/app/ALBForImport/8db123b49az6de94",
+			setUpMock: func(m *mocks.Mockapi) {
+				m.EXPECT().DescribeLoadBalancers(&elbv2.DescribeLoadBalancersInput{
+					LoadBalancerArns: []*string{aws.String("arn:aws:elasticloadbalancing:us-west-2:123594734248:loadbalancer/app/ALBForImport/8db123b49az6de94")}}).Return(mockOutput, nil)
+				m.EXPECT().DescribeListeners(&elbv2.DescribeListenersInput{
+					LoadBalancerArn: aws.String("mockLBARN"),
+				}).Return(&elbv2.DescribeListenersOutput{
+					Listeners: []*elbv2.Listener{
+						{
+							ListenerArn: aws.String("mockListenerARN"),
+							Port:        aws.Int64(80),
+							Protocol:    aws.String("http"),
+						},
+					},
+					NextMarker: nil,
+				}, nil)
+			},
+			expectedLB: &LoadBalancer{
+				ARN:          "mockLBARN",
+				Name:         "mockLBName",
+				DNSName:      "mockDNSName",
+				Scheme:       "internet-facing",
+				HostedZoneID: "mockHostedZoneID",
+				Listeners: []Listener{
+					{
+						ARN:      "mockListenerARN",
+						Port:     80,
+						Protocol: "http",
+					},
+				},
+				SecurityGroups: []string{"sg1", "sg2"},
+			},
+		},
+		"error if describe LB call fails": {
+			mockID: "loadBalancerName",
+			setUpMock: func(m *mocks.Mockapi) {
+				m.EXPECT().DescribeLoadBalancers(&elbv2.DescribeLoadBalancersInput{
+					Names: []*string{aws.String("loadBalancerName")}}).Return(nil, errors.New("some error"))
+			},
+			expectedErr: `describe load balancer "loadBalancerName": some error`,
+		},
+		"error if no load balancers returned": {
+			mockID: "mockLBName",
+			setUpMock: func(m *mocks.Mockapi) {
+				m.EXPECT().DescribeLoadBalancers(&elbv2.DescribeLoadBalancersInput{
+					Names: []*string{aws.String("mockLBName")},
+				}).Return(&elbv2.DescribeLoadBalancersOutput{
+					LoadBalancers: []*elbv2.LoadBalancer{},
+				}, nil)
+			},
+			expectedErr: `no load balancer "mockLBName" found`,
+		},
+		"error if describe listeners call fails": {
+			mockID: "loadBalancerName",
+			setUpMock: func(m *mocks.Mockapi) {
+				m.EXPECT().DescribeLoadBalancers(&elbv2.DescribeLoadBalancersInput{
+					Names: []*string{aws.String("loadBalancerName")},
+				}).Return(mockOutput, nil)
+				m.EXPECT().DescribeListeners(&elbv2.DescribeListenersInput{
+					LoadBalancerArn: aws.String("mockLBARN"),
+				}).Return(nil, errors.New("some error"))
+			},
+			expectedErr: `describe listeners on load balancer "mockLBARN": some error`,
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockAPI := mocks.NewMockapi(ctrl)
+			tc.setUpMock(mockAPI)
+
+			elbv2Client := ELBV2{
+				client: mockAPI,
+			}
+
+			actual, err := elbv2Client.LoadBalancer(tc.mockID)
+			if tc.expectedErr != "" {
+				require.EqualError(t, err, tc.expectedErr)
+			} else {
+				require.Equal(t, tc.expectedLB, actual)
+			}
+		})
+	}
+}
+
+func TestELBV2_listeners(t *testing.T) {
+	mockLBARN := aws.String("mockLoadBalancerARN")
+	mockOutput := &elbv2.DescribeListenersOutput{
+		Listeners: []*elbv2.Listener{
+			{
+				ListenerArn: aws.String("listenerARN1"),
+				Port:        aws.Int64(80),
+				Protocol:    aws.String("HTTP"),
+			},
+			{
+				ListenerArn: aws.String("listenerARN2"),
+				Port:        aws.Int64(443),
+				Protocol:    aws.String("HTTPS"),
+			},
+		},
+	}
+	testCases := map[string]struct {
+		setUpMock func(m *mocks.Mockapi)
+
+		expectedErr       string
+		expectedListeners []Listener
+	}{
+		"successfully return listeners from LB ARN": {
+			setUpMock: func(m *mocks.Mockapi) {
+				m.EXPECT().DescribeListeners(&elbv2.DescribeListenersInput{
+					LoadBalancerArn: mockLBARN,
+				}).Return(mockOutput, nil)
+			},
+			expectedListeners: []Listener{
+				{
+					ARN:      "listenerARN1",
+					Port:     80,
+					Protocol: "HTTP",
+				},
+				{
+					ARN:      "listenerARN2",
+					Port:     443,
+					Protocol: "HTTPS",
+				},
+			},
+		},
+		"error if describe call fails": {
+			setUpMock: func(m *mocks.Mockapi) {
+				m.EXPECT().DescribeListeners(&elbv2.DescribeListenersInput{
+					LoadBalancerArn: mockLBARN,
+				}).Return(nil, errors.New("some error"))
+			},
+			expectedErr: `describe listeners on load balancer "mockLoadBalancerARN": some error`,
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockAPI := mocks.NewMockapi(ctrl)
+			tc.setUpMock(mockAPI)
+
+			elbv2Client := ELBV2{
+				client: mockAPI,
+			}
+
+			actual, err := elbv2Client.listeners(aws.StringValue(mockLBARN))
+			if tc.expectedErr != "" {
+				require.EqualError(t, err, tc.expectedErr)
+			} else {
+				require.Equal(t, tc.expectedListeners, actual)
+			}
 		})
 	}
 }

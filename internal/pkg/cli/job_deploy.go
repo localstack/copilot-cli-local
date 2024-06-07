@@ -13,14 +13,17 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/aws/copilot-cli/internal/pkg/describe"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"github.com/spf13/afero"
 
+	deploycfn "github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/exec"
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
 
 	"github.com/spf13/cobra"
 
+	awscfn "github.com/aws/copilot-cli/internal/pkg/aws/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/aws/identity"
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
 	"github.com/aws/copilot-cli/internal/pkg/aws/tags"
@@ -41,6 +44,7 @@ type deployJobOpts struct {
 	unmarshal            func(in []byte) (manifest.DynamicWorkload, error)
 	newInterpolator      func(app, env string) interpolator
 	cmd                  execRunner
+	jobVersionGetter     versionGetter
 	sessProvider         *sessions.Provider
 	newJobDeployer       func() (workloadDeployer, error)
 	envFeaturesDescriber versionCompatibilityChecker
@@ -53,8 +57,12 @@ type deployJobOpts struct {
 	targetApp         *config.Application
 	targetEnv         *config.Environment
 	envSess           *session.Session
+	rawMft            string // Content of the environment manifest with env var interpolation only.
 	appliedDynamicMft manifest.DynamicWorkload
 	rootUserARN       string
+
+	// Overridden in tests.
+	templateVersion string
 }
 
 func newJobDeployOpts(vars deployWkldVars) (*deployJobOpts, error) {
@@ -75,11 +83,12 @@ func newJobDeployOpts(vars deployWkldVars) (*deployJobOpts, error) {
 		store:           store,
 		ws:              ws,
 		unmarshal:       manifest.UnmarshalWorkload,
-		sel:             selector.NewLocalWorkloadSelector(prompter, store, ws),
+		sel:             selector.NewLocalWorkloadSelector(prompter, store, ws, selector.OnlyInitializedWorkloads),
 		prompt:          prompter,
 		sessProvider:    sessProvider,
 		newInterpolator: newManifestInterpolator,
 		cmd:             exec.NewCmd(),
+		templateVersion: version.LatestTemplateVersion(),
 		diffWriter:      os.Stdout,
 	}
 	opts.newJobDeployer = func() (workloadDeployer, error) {
@@ -90,10 +99,6 @@ func newJobDeployOpts(vars deployWkldVars) (*deployJobOpts, error) {
 }
 
 func newJobDeployer(o *deployJobOpts) (workloadDeployer, error) {
-	raw, err := o.ws.ReadWorkloadManifest(o.name)
-	if err != nil {
-		return nil, fmt.Errorf("read manifest file for %s: %w", o.name, err)
-	}
 	ovrdr, err := deploy.NewOverrider(o.ws.WorkloadOverridesPath(o.name), o.appName, o.envName, afero.NewOsFs(), o.sessProvider)
 	if err != nil {
 		return nil, err
@@ -110,7 +115,7 @@ func newJobDeployer(o *deployJobOpts) (workloadDeployer, error) {
 			GitShortCommitTag: o.gitShortCommit,
 		},
 		Mft:              content,
-		RawMft:           raw,
+		RawMft:           o.rawMft,
 		EnvVersionGetter: o.envFeaturesDescriber,
 		Overrider:        ovrdr,
 	}
@@ -163,12 +168,17 @@ func (o *deployJobOpts) Execute() error {
 			return err
 		}
 	}
-	mft, err := workloadManifest(&workloadManifestInput{
+	if !o.allowWkldDowngrade {
+		if err := validateWkldVersion(o.jobVersionGetter, o.name, o.templateVersion); err != nil {
+			return err
+		}
+	}
+	mft, interpolated, err := workloadManifest(&workloadManifestInput{
 		name:         o.name,
 		appName:      o.appName,
 		envName:      o.envName,
-		interpolator: o.newInterpolator(o.appName, o.envName),
 		ws:           o.ws,
+		interpolator: o.newInterpolator(o.appName, o.envName),
 		unmarshal:    o.unmarshal,
 		sess:         o.envSess,
 	})
@@ -176,6 +186,7 @@ func (o *deployJobOpts) Execute() error {
 		return err
 	}
 	o.appliedDynamicMft = mft
+	o.rawMft = interpolated
 	if err := validateWorkloadManifestCompatibilityWithEnv(o.ws, o.envFeaturesDescriber, mft, o.envName); err != nil {
 		return err
 	}
@@ -204,6 +215,7 @@ func (o *deployJobOpts) Execute() error {
 				EnvFileARNs:        uploadOut.EnvFileARNs,
 				ImageDigests:       uploadOut.ImageDigests,
 				AddonsURL:          uploadOut.AddonsURL,
+				Version:            o.templateVersion,
 				CustomResourceURLs: uploadOut.CustomResourceURLs,
 			},
 		})
@@ -230,13 +242,25 @@ func (o *deployJobOpts) Execute() error {
 			EnvFileARNs:        uploadOut.EnvFileARNs,
 			AddonsURL:          uploadOut.AddonsURL,
 			RootUserARN:        o.rootUserARN,
+			Version:            o.templateVersion,
 			Tags:               tags.Merge(o.targetApp.Tags, o.resourceTags),
 			CustomResourceURLs: uploadOut.CustomResourceURLs,
 		},
 		Options: deploy.Options{
 			DisableRollback: o.disableRollback,
+			Detach:          o.detach,
 		},
 	}); err != nil {
+		var errStackDeletedOnInterrupt *deploycfn.ErrStackDeletedOnInterrupt
+		var errStackUpdateCanceledOnInterrupt *deploycfn.ErrStackUpdateCanceledOnInterrupt
+		var errEmptyChangeSet *awscfn.ErrChangeSetEmpty
+		if errors.As(err, &errStackDeletedOnInterrupt) {
+			return nil
+		}
+		if errors.As(err, &errStackUpdateCanceledOnInterrupt) {
+			log.Successf("Successfully rolled back service %s to the previous configuration.\n", color.HighlightUserInput(o.name))
+			return nil
+		}
 		if o.disableRollback {
 			stackName := stack.NameForWorkload(o.targetApp.Name, o.targetEnv.Name, o.name)
 			rollbackCmd := fmt.Sprintf("aws cloudformation rollback-stack --stack-name %s --role-arn %s", stackName, o.targetEnv.ExecutionRoleARN)
@@ -246,7 +270,13 @@ After fixing the deployment, you can:
 2. Run %s to make a new deployment.
 `, color.HighlightCode(rollbackCmd), color.HighlightCode("copilot job deploy"))
 		}
+		if errors.As(err, &errEmptyChangeSet) {
+			return &errNoInfrastructureChanges{parentErr: err}
+		}
 		return fmt.Errorf("deploy job %s to environment %s: %w", o.name, o.envName, err)
+	}
+	if o.detach {
+		return nil
 	}
 	log.Successf("Deployed %s.\n", color.HighlightUserInput(o.name))
 	return nil
@@ -292,6 +322,17 @@ func (o *deployJobOpts) configureClients() error {
 		return err
 	}
 	o.envFeaturesDescriber = envDescriber
+
+	wkldDescriber, err := describe.NewWorkloadStackDescriber(describe.NewWorkloadConfig{
+		App:         o.appName,
+		Env:         o.envName,
+		Name:        o.name,
+		ConfigStore: o.store,
+	})
+	if err != nil {
+		return err
+	}
+	o.jobVersionGetter = wkldDescriber
 	return nil
 }
 
@@ -373,5 +414,7 @@ func buildJobDeployCmd() *cobra.Command {
 	cmd.Flags().StringToStringVar(&vars.resourceTags, resourceTagsFlag, nil, resourceTagsFlagDescription)
 	cmd.Flags().BoolVar(&vars.disableRollback, noRollbackFlag, false, noRollbackFlagDescription)
 	cmd.Flags().BoolVar(&vars.showDiff, diffFlag, false, diffFlagDescription)
+	cmd.Flags().BoolVar(&vars.allowWkldDowngrade, allowDowngradeFlag, false, allowDowngradeFlagDescription)
+	cmd.Flags().BoolVar(&vars.detach, detachFlag, false, detachFlagDescription)
 	return cmd
 }

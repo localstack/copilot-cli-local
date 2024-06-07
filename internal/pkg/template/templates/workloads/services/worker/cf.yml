@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a worker service on Amazon ECS.
-{{- if .SerializedManifest }}
 Metadata:
+  Version: {{ .Version }}
+{{- if .SerializedManifest }}
   Manifest: |
 {{indent 4 .SerializedManifest}}
 {{- end }}
@@ -42,6 +43,9 @@ Parameters:
     Description: 'URL of the environment file for the {{$sidecar.Name}} sidecar.'
     Default: ""
 {{- end }}
+  ArtifactKeyARN:
+    Type: String
+    Description: 'KMS Key used for encrypting artifacts'
   LogRetention:
     Type: Number
     Default: 30

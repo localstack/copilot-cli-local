@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/aws/identity"
 	"github.com/aws/copilot-cli/internal/pkg/describe"
 	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"github.com/dustin/go-humanize/english"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -101,6 +104,12 @@ These messages can be consumed by the Worker Service.`
 const (
 	ingressTypeEnvironment = "Environment"
 	ingressTypeInternet    = "Internet"
+
+	rdwsTypeHint = "App Runner"
+	lbwsTypeHint = "Public. ALB by default. Internet to ECS on Fargate"
+	besTypeHint  = "Private. ALB optional. ECS on Fargate"
+	wsTypeHint   = "Events to SQS to ECS on Fargate"
+	ssTypeHint   = "Internet to CDN to S3 bucket"
 )
 
 var rdwsIngressOptions = []string{
@@ -109,22 +118,23 @@ var rdwsIngressOptions = []string{
 }
 
 var serviceTypeHints = map[string]string{
-	manifestinfo.RequestDrivenWebServiceType: "App Runner",
-	manifestinfo.LoadBalancedWebServiceType:  "Internet to ECS on Fargate",
-	manifestinfo.BackendServiceType:          "ECS on Fargate",
-	manifestinfo.WorkerServiceType:           "Events to SQS to ECS on Fargate",
-	manifestinfo.StaticSiteType:              "Internet to CDN to S3 bucket",
+	manifestinfo.RequestDrivenWebServiceType: rdwsTypeHint,
+	manifestinfo.LoadBalancedWebServiceType:  lbwsTypeHint,
+	manifestinfo.BackendServiceType:          besTypeHint,
+	manifestinfo.WorkerServiceType:           wsTypeHint,
+	manifestinfo.StaticSiteType:              ssTypeHint,
 }
 
 type initWkldVars struct {
-	appName        string
-	wkldType       string
-	name           string
-	dockerfilePath string
-	image          string
-	subscriptions  []string
-	noSubscribe    bool
-	sourcePaths    []string
+	appName           string
+	wkldType          string
+	name              string
+	dockerfilePath    string
+	image             string
+	subscriptions     []string
+	noSubscribe       bool
+	sourcePaths       []string
+	allowAppDowngrade bool
 }
 
 type initSvcVars struct {
@@ -147,6 +157,7 @@ type initSvcOpts struct {
 	sourceSel    staticSourceSelector
 	topicSel     topicSelector
 	mftReader    manifestReader
+	svcLister    wlLister
 
 	// Outputs stored on successful actions.
 	manifestPath string
@@ -162,11 +173,14 @@ type initSvcOpts struct {
 	df                  dockerfileParser
 	manifestExists      bool
 	additionalFoundPort uint16 // For logging a personalized recommended action with multiple ports.
+	wsRoot              string
 
-	// Init a Dockerfile parser using fs and input path
-	dockerfile func(string) dockerfileParser
-	// Init a new EnvDescriber using environment name and app name.
-	initEnvDescriber func(string, string) (envDescriber, error)
+	dockerfile          func(path string) dockerfileParser
+	initEnvDescriber    func(appName, envName string) (envDescriber, error)
+	newAppVersionGetter func(appName string) (versionGetter, error)
+
+	// Overridden in tests.
+	templateVersion string
 }
 
 func newInitSvcOpts(vars initSvcVars) (*initSvcOpts, error) {
@@ -175,7 +189,6 @@ func newInitSvcOpts(vars initSvcVars) (*initSvcOpts, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	sessProvider := sessions.ImmutableProvider(sessions.UserAgentExtras("svc init"))
 	sess, err := sessProvider.Default()
 	if err != nil {
@@ -203,19 +216,35 @@ func newInitSvcOpts(vars initSvcVars) (*initSvcOpts, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init a new local file selector: %w", err)
 	}
-
 	opts := &initSvcOpts{
-		initSvcVars:  vars,
-		store:        store,
-		fs:           fs,
-		init:         initSvc,
-		prompt:       prompter,
-		sel:          dfSel,
-		topicSel:     snsSel,
-		sourceSel:    sourceSel,
-		mftReader:    ws,
-		dockerEngine: dockerengine.New(exec.NewCmd()),
-		wsAppName:    tryReadingAppName(),
+		initSvcVars: vars,
+		store:       store,
+		fs:          fs,
+		init:        initSvc,
+		prompt:      prompter,
+		sel:         dfSel,
+		topicSel:    snsSel,
+		sourceSel:   sourceSel,
+		mftReader:   ws,
+		svcLister:   ws,
+		newAppVersionGetter: func(appName string) (versionGetter, error) {
+			return describe.NewAppDescriber(appName)
+		},
+		initEnvDescriber: func(appName string, envName string) (envDescriber, error) {
+			envDescriber, err := describe.NewEnvDescriber(describe.NewEnvDescriberConfig{
+				App:         appName,
+				Env:         envName,
+				ConfigStore: store,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return envDescriber, nil
+		},
+		dockerEngine:    dockerengine.New(exec.NewCmd()),
+		wsAppName:       tryReadingAppName(),
+		wsRoot:          ws.ProjectRoot(),
+		templateVersion: version.LatestTemplateVersion(),
 	}
 	opts.dockerfile = func(path string) dockerfileParser {
 		if opts.df != nil {
@@ -223,17 +252,6 @@ func newInitSvcOpts(vars initSvcVars) (*initSvcOpts, error) {
 		}
 		opts.df = dockerfile.New(opts.fs, opts.dockerfilePath)
 		return opts.df
-	}
-	opts.initEnvDescriber = func(appName string, envName string) (envDescriber, error) {
-		envDescriber, err := describe.NewEnvDescriber(describe.NewEnvDescriberConfig{
-			App:         appName,
-			Env:         envName,
-			ConfigStore: opts.store,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("initiate env describer: %w", err)
-		}
-		return envDescriber, nil
 	}
 	return opts, nil
 }
@@ -270,7 +288,9 @@ func (o *initSvcOpts) Validate() error {
 		if o.wkldType != manifestinfo.StaticSiteType {
 			return fmt.Errorf("'--%s' must be specified with '--%s %q'", sourcesFlag, typeFlag, manifestinfo.StaticSiteType)
 		}
-		// Path validation against fs happens during conversion.
+		if err := o.validateSourcePaths(o.sourcePaths); err != nil {
+			return err
+		}
 		assets, err := o.convertStringsToAssets(o.sourcePaths)
 		if err != nil {
 			return fmt.Errorf("convert source strings to objects: %w", err)
@@ -282,6 +302,21 @@ func (o *initSvcOpts) Validate() error {
 	}
 	if err := o.validateIngressType(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (o *initSvcOpts) validateSourcePaths(sources []string) error {
+	if o.wsPendingCreation {
+		// This can happen during `copilot init`, that we have to `Validate` before there is a workspace.
+		// In this case, we skip the validation for path, and let `svc deploy` handle the validation.
+		return nil
+	}
+	for _, source := range sources {
+		_, err := o.fs.Stat(filepath.Join(o.wsRoot, source))
+		if err != nil {
+			return fmt.Errorf("source %q must be a valid path relative to the workspace %q: %w", source, o.wsRoot, err)
+		}
 	}
 	return nil
 }
@@ -336,6 +371,15 @@ func (o *initSvcOpts) Ask() error {
 
 // Execute writes the service's manifest file and stores the service in SSM.
 func (o *initSvcOpts) Execute() error {
+	if !o.allowAppDowngrade {
+		appVersionGetter, err := o.newAppVersionGetter(o.appName)
+		if err != nil {
+			return err
+		}
+		if err := validateAppVersion(appVersionGetter, o.appName, o.templateVersion); err != nil {
+			return err
+		}
+	}
 	// Check for a valid healthcheck and add it to the opts.
 	var hc manifest.ContainerHealthCheck
 	var err error
@@ -451,6 +495,16 @@ func (o *initSvcOpts) validateSvc() error {
 func (o *initSvcOpts) validateDuplicateSvc() error {
 	_, err := o.store.GetService(o.appName, o.name)
 	if err == nil {
+		// Skip error if service already exists in workspace
+		if !o.wsPendingCreation {
+			svcs, err := o.svcLister.ListWorkloads()
+			if err != nil {
+				return err
+			}
+			if slices.Contains(svcs, o.name) {
+				return nil
+			}
+		}
 		log.Errorf(`It seems like you are trying to init a service that already exists.
 To recreate the service, please run:
 1. %s. Note: The manifest file will not be deleted and will be used in Step 2.
@@ -476,18 +530,33 @@ func (o *initSvcOpts) askStaticSite() error {
 	var sources []string
 	var err error
 	if o.wsPendingCreation {
-		sources, err = selector.AskCustomPaths(o.prompt, fmt.Sprintf(fmtStaticSiteInitDirFilePathPrompt, color.HighlightUserInput(o.name)), staticSiteInitDirFilePathHelpPrompt,
-			func(v interface{}) error {
-				return validatePath(o.fs, v)
-			})
-		if err != nil {
-			return err
-		}
+		sources, err = selector.AskCustomPaths(
+			o.prompt,
+			fmt.Sprintf(fmtStaticSiteInitDirFilePathPrompt, color.HighlightUserInput(o.name)),
+			staticSiteInitDirFilePathHelpPrompt,
+			validateNonEmptyString, // When the workspace is absent, we skip the validation and leave it to `svc deploy`.
+		)
 	} else {
-		sources, err = o.askSource()
-		if err != nil {
-			return err
-		}
+		sources, err = o.sourceSel.StaticSources(
+			fmt.Sprintf(fmtStaticSiteInitDirFilePrompt, color.HighlightUserInput(o.name)),
+			staticSiteInitDirFileHelpPrompt,
+			fmt.Sprintf(fmtStaticSiteInitDirFilePathPrompt, color.HighlightUserInput(o.name)),
+			staticSiteInitDirFilePathHelpPrompt,
+			func(val interface{}) error {
+				path, ok := val.(string)
+				if !ok {
+					return errValueNotAString
+				}
+				_, err := o.fs.Stat(filepath.Join(o.wsRoot, path))
+				if err != nil {
+					return fmt.Errorf("source %q must be a valid path relative to the workspace %q: %w", path, o.wsRoot, err)
+				}
+				return nil
+			},
+		)
+	}
+	if err != nil {
+		return err
 	}
 	if o.staticAssets, err = o.convertStringsToAssets(sources); err != nil {
 		return fmt.Errorf("convert source paths to asset objects: %w", err)
@@ -561,22 +630,6 @@ func (o *initSvcOpts) askImage() error {
 	}
 	o.image = image
 	return nil
-}
-
-func (o *initSvcOpts) askSource() ([]string, error) {
-	sources, err := o.sourceSel.StaticSources(
-		fmt.Sprintf(fmtStaticSiteInitDirFilePrompt, color.HighlightUserInput(o.name)),
-		staticSiteInitDirFileHelpPrompt,
-		fmt.Sprintf(fmtStaticSiteInitDirFilePathPrompt, color.HighlightUserInput(o.name)),
-		staticSiteInitDirFilePathHelpPrompt,
-		func(v interface{}) error {
-			return validatePath(o.fs, v)
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("select local directory or file: %w", err)
-	}
-	return sources, nil
 }
 
 func (o *initSvcOpts) manifestAlreadyExists() (bool, error) {
@@ -681,7 +734,7 @@ func (o *initSvcOpts) askSvcPort() (err error) {
 		return nil
 	}
 	port, err := o.prompt.Get(
-		fmt.Sprintf(svcInitSvcPortPrompt, color.Emphasize("port(s)")),
+		fmt.Sprintf(svcInitSvcPortPrompt, color.Emphasize("port")),
 		svcInitSvcPortHelpPrompt,
 		validateSvcPort,
 		prompt.WithDefaultInput(defaultPort),
@@ -805,14 +858,21 @@ func validateWorkspaceApp(wsApp, inputApp string, store store) error {
 
 func (o initSvcOpts) convertStringsToAssets(sources []string) ([]manifest.FileUpload, error) {
 	assets := make([]manifest.FileUpload, len(sources))
+	var root string
+	if !o.wsPendingCreation {
+		root = o.wsRoot
+	}
 	for i, source := range sources {
-		info, err := o.fs.Stat(source)
-		if err != nil {
-			return nil, err
+		info, err := o.fs.Stat(filepath.Join(root, source))
+		var recursive bool
+		if err == nil && info.IsDir() {
+			// Swallow the error at this point, because the path would have been validated during Validate or Ask, or will
+			// be validated during deploy.
+			recursive = true
 		}
 		assets[i] = manifest.FileUpload{
 			Source:    source,
-			Recursive: info.IsDir(),
+			Recursive: recursive,
 		}
 	}
 	return assets, nil
@@ -903,6 +963,7 @@ This command is also run as part of "copilot init".`,
 	cmd.Flags().BoolVar(&vars.noSubscribe, noSubscriptionFlag, false, noSubscriptionFlagDescription)
 	cmd.Flags().StringVar(&vars.ingressType, ingressTypeFlag, "", ingressTypeFlagDescription)
 	cmd.Flags().StringArrayVar(&vars.sourcePaths, sourcesFlag, nil, sourcesFlagDescription)
+	cmd.Flags().BoolVar(&vars.allowAppDowngrade, allowDowngradeFlag, false, allowDowngradeFlagDescription)
 
 	return cmd
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/copilot-cli/internal/pkg/template"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"gopkg.in/yaml.v3"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -43,7 +44,7 @@ func (cf CloudFormation) CreateAndRenderEnvironment(conf StackConfiguration, buc
 }
 
 // UpdateAndRenderEnvironment updates the CloudFormation stack for an environment, and render the stack creation to out.
-func (cf CloudFormation) UpdateAndRenderEnvironment(conf StackConfiguration, bucketARN string, opts ...cloudformation.StackOption) error {
+func (cf CloudFormation) UpdateAndRenderEnvironment(conf StackConfiguration, bucketARN string, detach bool, opts ...cloudformation.StackOption) error {
 	cfnStack, err := cf.toUploadedStack(bucketARN, conf)
 	if err != nil {
 		return err
@@ -63,6 +64,8 @@ func (cf CloudFormation) UpdateAndRenderEnvironment(conf StackConfiguration, buc
 		}
 		return changeSetID, nil
 	}
+	in.enableInterrupt = true
+	in.detach = detach
 	return cf.executeAndRenderChangeSet(in)
 }
 
@@ -77,8 +80,12 @@ func newRenderEnvironmentInput(cfnStack *cloudformation.Stack) *executeAndRender
 func (cf CloudFormation) DeleteEnvironment(appName, envName, cfnExecRoleARN string) error {
 	stackName := stack.NameForEnv(appName, envName)
 	description := fmt.Sprintf("Delete environment stack %s", stackName)
-	return cf.deleteAndRenderStack(stackName, description, func() error {
-		return cf.cfnClient.DeleteAndWaitWithRoleARN(stackName, cfnExecRoleARN)
+	return cf.deleteAndRenderStack(deleteAndRenderInput{
+		stackName:   stackName,
+		description: description,
+		deleteFn: func() error {
+			return cf.cfnClient.DeleteAndWaitWithRoleARN(stackName, cfnExecRoleARN)
+		},
 	})
 }
 
@@ -203,5 +210,5 @@ func (cf CloudFormation) isInitialDeployment(appName, envName string) (bool, err
 	if err := yaml.Unmarshal([]byte(raw), &metadata); err != nil {
 		return false, fmt.Errorf("unmarshal Metadata property to read Version: %w", err)
 	}
-	return metadata.Version == deploy.EnvTemplateVersionBootstrap, nil
+	return metadata.Version == version.EnvTemplateBootstrap, nil
 }

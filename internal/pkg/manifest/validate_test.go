@@ -256,6 +256,15 @@ func TestLoadBalancedWebService_validate(t *testing.T) {
 			},
 			wantedError: fmt.Errorf(`"name" must be specified`),
 		},
+		"error if http field is empty": {
+			lbConfig: LoadBalancedWebService{
+				Workload: Workload{Name: aws.String("mockName")},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: testImageConfig,
+				},
+			},
+			wantedErrorMsgPrefix: `"http" must be specified`,
+		},
 		"error if fail to validate HTTP load balancer target": {
 			lbConfig: LoadBalancedWebService{
 				Workload: Workload{Name: aws.String("mockName")},
@@ -332,10 +341,12 @@ func TestLoadBalancedWebService_validate(t *testing.T) {
 					ImageConfig: testImageConfig,
 					Sidecars: map[string]*SidecarConfig{
 						"foo": {
+							Image:     BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: map[string]string{"bar": "healthy"},
 							Essential: aws.Bool(false),
 						},
 						"bar": {
+							Image:     BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: map[string]string{"foo": "healthy"},
 							Essential: aws.Bool(false),
 						},
@@ -351,7 +362,7 @@ func TestLoadBalancedWebService_validate(t *testing.T) {
 			},
 			wantedErrorMsgPrefix: `validate container dependencies: `,
 		},
-		"error if fail to validate windows": {
+		"error if fail to validate windows with volumes": {
 			lbConfig: LoadBalancedWebService{
 				Workload: Workload{Name: aws.String("mockName")},
 				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
@@ -380,6 +391,30 @@ func TestLoadBalancedWebService_validate(t *testing.T) {
 				},
 			},
 			wantedErrorMsgPrefix: `validate Windows: `,
+		},
+		"error if Windows is used with service connect": {
+			lbConfig: LoadBalancedWebService{
+				Workload: Workload{Name: aws.String("mockName")},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: testImageConfig,
+					TaskConfig: TaskConfig{
+						Platform: PlatformArgsOrString{PlatformString: (*PlatformString)(aws.String("windows/amd64"))},
+					},
+					HTTPOrBool: HTTPOrBool{
+						HTTP: HTTP{
+							Main: RoutingRule{
+								Path: stringP("/"),
+							},
+						},
+					},
+					Network: NetworkConfig{
+						Connect: ServiceConnectBoolOrArgs{
+							EnableServiceConnect: aws.Bool(true),
+						},
+					},
+				},
+			},
+			wantedErrorMsgPrefix: "validate Windows: service connect (`network.connect`) is not supported for Window",
 		},
 		"error if fail to validate ARM": {
 			lbConfig: LoadBalancedWebService{
@@ -476,6 +511,25 @@ func TestLoadBalancedWebService_validate(t *testing.T) {
 			},
 			wantedError: errors.New(`scaling based on "nlb" requests or response time is not supported`),
 		},
+		"error if healthcheck points to nlb port using udp": {
+			lbConfig: LoadBalancedWebService{
+				Workload: Workload{
+					Name: aws.String("mockName"),
+				},
+				LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+					ImageConfig: testImageConfig,
+					HTTPOrBool: HTTPOrBool{
+						Enabled: aws.Bool(false),
+					},
+					NLBConfig: NetworkLoadBalancerConfiguration{
+						Listener: NetworkLoadBalancerListener{
+							Port: aws.String("80/udp"),
+						},
+					},
+				},
+			},
+			wantedError: fmt.Errorf(`validate load balancer health check ports: container "mockName" exposes port 80 using protocol udp invalid for health checks. Valid protocol is "TCP".`),
+		},
 		"error if fail to validate deployment": {
 			lbConfig: LoadBalancedWebService{
 				Workload: Workload{
@@ -557,6 +611,7 @@ func TestBackendService_validate(t *testing.T) {
 					ImageConfig: testImageConfig,
 					Sidecars: map[string]*SidecarConfig{
 						"foo": {
+							Image: BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: DependsOn{
 								"foo": "bar",
 							},
@@ -622,9 +677,11 @@ func TestBackendService_validate(t *testing.T) {
 					ImageConfig: testImageConfig,
 					Sidecars: map[string]*SidecarConfig{
 						"foo": {
+							Image:     BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: map[string]string{"bar": "start"},
 						},
 						"bar": {
+							Image:     BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: map[string]string{"foo": "start"},
 						},
 					},
@@ -632,7 +689,7 @@ func TestBackendService_validate(t *testing.T) {
 			},
 			wantedErrorMsgPrefix: `validate container dependencies: `,
 		},
-		"error if fail to validate Windows": {
+		"error if fail to validate Windows with volumes": {
 			config: BackendService{
 				Workload: Workload{Name: aws.String("mockName")},
 				BackendServiceConfig: BackendServiceConfig{
@@ -654,6 +711,23 @@ func TestBackendService_validate(t *testing.T) {
 				},
 			},
 			wantedErrorMsgPrefix: `validate Windows: `,
+		},
+		"error if Windows is used with service connect": {
+			config: BackendService{
+				Workload: Workload{Name: aws.String("mockName")},
+				BackendServiceConfig: BackendServiceConfig{
+					ImageConfig: testImageConfig,
+					TaskConfig: TaskConfig{
+						Platform: PlatformArgsOrString{PlatformString: (*PlatformString)(aws.String("windows/amd64"))},
+					},
+					Network: NetworkConfig{
+						Connect: ServiceConnectBoolOrArgs{
+							EnableServiceConnect: aws.Bool(true),
+						},
+					},
+				},
+			},
+			wantedErrorMsgPrefix: "validate Windows: service connect (`network.connect`) is not supported for Window",
 		},
 		"error if fail to validate ARM": {
 			config: BackendService{
@@ -1068,9 +1142,11 @@ func TestWorkerService_validate(t *testing.T) {
 					ImageConfig: testImageConfig,
 					Sidecars: map[string]*SidecarConfig{
 						"foo": {
+							Image:     BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: map[string]string{"bar": "start"},
 						},
 						"bar": {
+							Image:     BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: map[string]string{"foo": "start"},
 						},
 					},
@@ -1303,9 +1379,11 @@ func TestScheduledJob_validate(t *testing.T) {
 					},
 					Sidecars: map[string]*SidecarConfig{
 						"foo": {
+							Image:     BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: map[string]string{"bar": "start"},
 						},
 						"bar": {
+							Image:     BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 							DependsOn: map[string]string{"foo": "start"},
 						},
 					},
@@ -1372,6 +1450,40 @@ func TestPipelineManifest_validate(t *testing.T) {
 			wantedError: errors.New("pipeline name '12345678902234567890323456789042345678905234567890623456789072345678908234567890923456789010234567890' must be shorter than 100 characters"),
 		},
 		"should validate pipeline stages": {
+			Pipeline: Pipeline{
+				Name: "release",
+				Stages: []PipelineStage{
+					{
+						Name: "test",
+						PostDeployments: PrePostDeployments{
+							"first_action": &PrePostDeployment{
+								BuildspecPath: "copilot/pipelines/my-pipeline/buildspecs/migration.yml",
+							},
+						},
+						TestCommands: []string{"testing", "testing123"},
+					},
+				},
+			},
+			wantedError: errors.New(`validate stage "test" for pipeline "release": must specify one, not both, of "post_deployments" and "test_commands"`),
+		},
+		"should validate buildspec exists for pre/post-deployments": {
+			Pipeline: Pipeline{
+				Name: "release",
+				Stages: []PipelineStage{
+					{
+						Name: "test",
+						PostDeployments: PrePostDeployments{
+							"first_action": &PrePostDeployment{
+								BuildspecPath: "copilot/pipelines/my-pipeline/buildspecs/migration.yml",
+							},
+							"second_action": &PrePostDeployment{},
+						},
+					},
+				},
+			},
+			wantedError: errors.New(`validate stage "test" for pipeline "release": "buildspec" must be specified`),
+		},
+		"should validate pipeline deployments": {
 			Pipeline: Pipeline{
 				Name: "release",
 				Stages: []PipelineStage{
@@ -1606,6 +1718,48 @@ func TestRoutingRule_validate(t *testing.T) {
 			},
 			wantedErrorMsgPrefix: `validate "alias":`,
 		},
+		"error if fail to valiadte condition values per listener rule": {
+			RoutingRule: RoutingRule{
+				Path: stringP("/"),
+				Alias: Alias{
+					StringSliceOrString: StringSliceOrString{
+						StringSlice: []string{
+							"example.com",
+							"v1.example.com",
+							"v2.example.com",
+							"v3.example.com",
+							"v4.example.com",
+						},
+					},
+				},
+			},
+			wantedError: fmt.Errorf(`validate condition values per listener rule: listener rule has more than five conditions example.com, v1.example.com, v2.example.com, v3.example.com and v4.example.com `),
+		},
+		"error if fail to validate condition values for advanced aliases": {
+			RoutingRule: RoutingRule{
+				Path: stringP("/"),
+				Alias: Alias{
+					AdvancedAliases: []AdvancedAlias{
+						{
+							Alias: aws.String("example.com"),
+						},
+						{
+							Alias: aws.String("v1.example.com"),
+						},
+						{
+							Alias: aws.String("v2.example.com"),
+						},
+						{
+							Alias: aws.String("v3.example.com"),
+						},
+						{
+							Alias: aws.String("v4.example.com"),
+						},
+					},
+				},
+			},
+			wantedError: fmt.Errorf(`validate condition values per listener rule: listener rule has more than five conditions example.com, v1.example.com, v2.example.com, v3.example.com and v4.example.com `),
+		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
@@ -1767,7 +1921,7 @@ func TestNetworkLoadBalancerConfiguration_validate(t *testing.T) {
 				},
 			},
 			wantedErrorMsgPrefix: `validate "nlb": `,
-			wantedError:          fmt.Errorf(`validate "port": invalid protocol tps; valid protocols include TCP and TLS`),
+			wantedError:          fmt.Errorf(`validate "port": invalid protocol tps; valid protocols include TCP, UDP and TLS`),
 		},
 		"fail if protocol is not recognized in additional listeners": {
 			nlb: NetworkLoadBalancerConfiguration{
@@ -1781,7 +1935,7 @@ func TestNetworkLoadBalancerConfiguration_validate(t *testing.T) {
 				},
 			},
 			wantedErrorMsgPrefix: `validate "nlb": `,
-			wantedError:          fmt.Errorf(`validate "additional_listeners[0]": validate "port": invalid protocol tps; valid protocols include TCP and TLS`),
+			wantedError:          fmt.Errorf(`validate "additional_listeners[0]": validate "port": invalid protocol tps; valid protocols include TCP, UDP and TLS`),
 		},
 		"success if tcp": {
 			nlb: NetworkLoadBalancerConfiguration{
@@ -1790,15 +1944,14 @@ func TestNetworkLoadBalancerConfiguration_validate(t *testing.T) {
 				},
 			},
 		},
-		"error if udp": {
+		"success if udp": {
 			nlb: NetworkLoadBalancerConfiguration{
 				Listener: NetworkLoadBalancerListener{
 					Port: aws.String("161/udp"),
 				},
 			},
-			wantedError: fmt.Errorf(`validate "port": invalid protocol udp; valid protocols include TCP and TLS`),
 		},
-		"error if udp in additional listeners": {
+		"success if udp in additional listeners": {
 			nlb: NetworkLoadBalancerConfiguration{
 				Listener: NetworkLoadBalancerListener{
 					Port: aws.String("161/tcp"),
@@ -1809,7 +1962,6 @@ func TestNetworkLoadBalancerConfiguration_validate(t *testing.T) {
 					},
 				},
 			},
-			wantedError: fmt.Errorf(`validate "additional_listeners[0]": validate "port": invalid protocol udp; valid protocols include TCP and TLS`),
 		},
 		"error if additional listeners are defined before main listener": {
 			nlb: NetworkLoadBalancerConfiguration{
@@ -1846,7 +1998,7 @@ func TestNetworkLoadBalancerConfiguration_validate(t *testing.T) {
 					Port: aws.String("443/TCP_udp"),
 				},
 			},
-			wantedError: fmt.Errorf(`validate "port": invalid protocol TCP_udp; valid protocols include TCP and TLS`),
+			wantedError: fmt.Errorf(`validate "port": invalid protocol TCP_udp; valid protocols include TCP, UDP and TLS`),
 		},
 		"error if tcp_udp in additional listeners": {
 			nlb: NetworkLoadBalancerConfiguration{
@@ -1859,7 +2011,7 @@ func TestNetworkLoadBalancerConfiguration_validate(t *testing.T) {
 					},
 				},
 			},
-			wantedError: fmt.Errorf(`validate "additional_listeners[0]": validate "port": invalid protocol TCP_udp; valid protocols include TCP and TLS`),
+			wantedError: fmt.Errorf(`validate "additional_listeners[0]": validate "port": invalid protocol TCP_udp; valid protocols include TCP, UDP and TLS`),
 		},
 		"error if hosted zone is set": {
 			nlb: NetworkLoadBalancerConfiguration{
@@ -2004,7 +2156,7 @@ func TestTaskConfig_validate(t *testing.T) {
 							EFS: EFSConfigOrBool{
 								Advanced: EFSVolumeConfiguration{
 									UID:          aws.Uint32(123),
-									FileSystemID: aws.String("mockID"),
+									FileSystemID: StringOrFromCFN{Plain: aws.String("mock-ID")},
 								},
 							},
 						},
@@ -2608,7 +2760,7 @@ func TestStorage_validate(t *testing.T) {
 					"foobar": {
 						EFS: EFSConfigOrBool{
 							Advanced: EFSVolumeConfiguration{
-								FileSystemID: aws.String("fs-1234567"),
+								FileSystemID: StringOrFromCFN{Plain: aws.String("fs-1234567")},
 							},
 						},
 						MountPointOpts: MountPointOpts{
@@ -2735,8 +2887,24 @@ func TestSidecarConfig_validate(t *testing.T) {
 
 		wantedErrorPrefix string
 	}{
+		"error if fail to validate image": {
+			config:            SidecarConfig{},
+			wantedErrorPrefix: `must specify one of "image", "image.build, or "image.location"`,
+		},
+		"error if fail to validate image build": {
+			config: SidecarConfig{
+				Image: AdvancedToUnion[*string](ImageLocationOrBuild{
+					Build: BuildArgsOrString{
+						BuildString: aws.String("mockDockerfile"),
+					},
+					Location: aws.String("mockimage:tag"),
+				}),
+			},
+			wantedErrorPrefix: `validate "image": `,
+		},
 		"error if fail to validate mount_points": {
 			config: SidecarConfig{
+				Image: BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 				MountPoints: []SidecarMountPoint{
 					{},
 				},
@@ -2745,6 +2913,7 @@ func TestSidecarConfig_validate(t *testing.T) {
 		},
 		"error if fail to validate depends_on": {
 			config: SidecarConfig{
+				Image: BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 				DependsOn: DependsOn{
 					"foo": "bar",
 				},
@@ -2753,6 +2922,7 @@ func TestSidecarConfig_validate(t *testing.T) {
 		},
 		"error if invalid env file": {
 			config: SidecarConfig{
+				Image:   BasicToUnion[*string, ImageLocationOrBuild](aws.String("123456789012.dkr.ecr.us-east-2.amazonaws.com/xray-daemon")),
 				EnvFile: aws.String("foo"),
 			},
 			wantedErrorPrefix: `environment file foo must`,
@@ -3869,6 +4039,121 @@ func TestFromEnvironment_validate(t *testing.T) {
 	}
 }
 
+func TestValidateHealthCheckPorts(t *testing.T) {
+	lbws := LoadBalancedWebService{
+		Workload: Workload{
+			Name: aws.String("mockWorkload"),
+		},
+		LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+			ImageConfig: ImageWithPortAndHealthcheck{
+				ImageWithPort: ImageWithPort{
+					Port: aws.Uint16(80),
+				},
+			},
+			HTTPOrBool: HTTPOrBool{
+				HTTP: HTTP{
+					Main: RoutingRule{
+						Path: aws.String("/"),
+					},
+				},
+			},
+			NLBConfig: NetworkLoadBalancerConfiguration{
+				Listener: NetworkLoadBalancerListener{
+					Port: aws.String("8080/udp"),
+					HealthCheck: NLBHealthCheckArgs{
+						Port: aws.Int(80),
+					},
+				},
+				AdditionalListeners: []NetworkLoadBalancerListener{
+					{
+						Port: aws.String("8081/udp"),
+						HealthCheck: NLBHealthCheckArgs{
+							Port: aws.Int(80),
+						},
+					},
+					{
+						Port: aws.String("8082"),
+					},
+				},
+			},
+		},
+	}
+	lbwsWithInvalidHealthChecks := LoadBalancedWebService{
+		LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
+			HTTPOrBool: HTTPOrBool{
+				HTTP: HTTP{
+					Main: RoutingRule{
+						Path: aws.String("/"),
+						HealthCheck: HealthCheckArgsOrString{
+							Union[string, HTTPHealthCheckArgs]{
+								Advanced: HTTPHealthCheckArgs{
+									Port: aws.Int(8080),
+								},
+							},
+						},
+						TargetPort: aws.Uint16(80),
+					},
+				},
+			},
+			NLBConfig: NetworkLoadBalancerConfiguration{
+				Listener: NetworkLoadBalancerListener{
+					Port: aws.String("8080/udp"),
+				},
+			},
+		},
+	}
+	exposedPortIndex, _ := lbws.ExposedPorts()
+	testCases := map[string]struct {
+		in     validateHealthCheckPortsOpts
+		wanted error
+	}{
+		"error with healthcheck on nlb udp": {
+			in: validateHealthCheckPortsOpts{
+				exposedPorts:      exposedPortIndex,
+				mainContainerPort: lbws.ImageConfig.Port,
+				nlb:               lbwsWithInvalidHealthChecks.NLBConfig,
+			},
+			wanted: fmt.Errorf(`container "mockWorkload" exposes port 8080 using protocol udp invalid for health checks. Valid protocol is "TCP".`),
+		},
+		"error with healthcheck on nlb udp from alb routing rule": {
+			in: validateHealthCheckPortsOpts{
+				exposedPorts:      exposedPortIndex,
+				mainContainerPort: lbws.ImageConfig.Port,
+				alb:               lbwsWithInvalidHealthChecks.HTTPOrBool.HTTP,
+			},
+			wanted: fmt.Errorf(`container "mockWorkload" exposes port 8080 using protocol udp invalid for health checks. Valid protocol is "TCP".`),
+		},
+		"error with healthcheck from image port": {
+			in: validateHealthCheckPortsOpts{
+				exposedPorts:      exposedPortIndex,
+				mainContainerPort: aws.Uint16(8080),
+				alb:               lbws.HTTPOrBool.HTTP,
+				nlb:               lbws.NLBConfig,
+			},
+			wanted: fmt.Errorf(`container "mockWorkload" exposes port 8080 using protocol udp invalid for health checks. Valid protocol is "TCP".`),
+		},
+		"no error with valid healthchecks": {
+			in: validateHealthCheckPortsOpts{
+				exposedPorts:      exposedPortIndex,
+				mainContainerPort: lbws.ImageConfig.Port,
+				alb:               lbws.HTTPOrBool.HTTP,
+				nlb:               lbws.NLBConfig,
+			},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			err := validateHealthCheckPorts(tc.in)
+
+			if tc.wanted != nil {
+				require.EqualError(t, err, tc.wanted.Error())
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidateExposedPorts(t *testing.T) {
 	testCases := map[string]struct {
 		in     validateExposedPortsOpts
@@ -3884,7 +4169,20 @@ func TestValidateExposedPorts(t *testing.T) {
 					},
 				},
 			},
-			wanted: fmt.Errorf(`containers "foo" and "mockMainContainer" are exposing the same port 80`),
+			wanted: fmt.Errorf(`containers "mockMainContainer" and "foo" are exposing the same port 80`),
+		},
+		"should not error out when main container uses non-default protocol": {
+			in: validateExposedPortsOpts{
+				mainContainerName: "mockMainContainer",
+				mainContainerPort: aws.Uint16(80),
+				nlb: &NetworkLoadBalancerConfiguration{
+					Listener: NetworkLoadBalancerListener{
+						Port:       aws.String("8080/udp"),
+						TargetPort: aws.Int(80),
+					},
+				},
+			},
+			wanted: nil,
 		},
 		"should not error out when alb target_port is same as that of sidecar container port but target_container is empty": {
 			in: validateExposedPortsOpts{
@@ -3902,6 +4200,78 @@ func TestValidateExposedPorts(t *testing.T) {
 				},
 			},
 			wanted: nil,
+		},
+		"should not error out when nlb target_port is same as that of sidecar container port but target_container is empty": {
+			in: validateExposedPortsOpts{
+				mainContainerName: "mockMainContainer",
+				mainContainerPort: aws.Uint16(8080),
+				sidecarConfig: map[string]*SidecarConfig{
+					"foo": {
+						Port: aws.String("80"),
+					},
+				},
+				nlb: &NetworkLoadBalancerConfiguration{
+					Listener: NetworkLoadBalancerListener{
+						Port:       aws.String("8080/tcp"),
+						TargetPort: aws.Int(80),
+					},
+				},
+			},
+			wanted: nil,
+		},
+		"should not error out when nlb target_port is same as that of sidecar container port but target_container and protocol is empty": {
+			in: validateExposedPortsOpts{
+				mainContainerName: "mockMainContainer",
+				mainContainerPort: aws.Uint16(8080),
+				sidecarConfig: map[string]*SidecarConfig{
+					"foo": {
+						Port: aws.String("80"),
+					},
+				},
+				nlb: &NetworkLoadBalancerConfiguration{
+					Listener: NetworkLoadBalancerListener{
+						Port:       aws.String("8080"),
+						TargetPort: aws.Int(80),
+					},
+				},
+			},
+			wanted: nil,
+		},
+		"should not error out when tls is terminated exposing a tcp port": {
+			in: validateExposedPortsOpts{
+				mainContainerName: "mockMainContainer",
+				mainContainerPort: aws.Uint16(8080),
+				sidecarConfig: map[string]*SidecarConfig{
+					"foo": {
+						Port: aws.String("80/tcp"),
+					},
+				},
+				nlb: &NetworkLoadBalancerConfiguration{
+					Listener: NetworkLoadBalancerListener{
+						Port:       aws.String("8080/tls"),
+						TargetPort: aws.Int(80),
+					},
+				},
+			},
+			wanted: nil,
+		},
+		"should return an error when nlb target_port is same as that of sidecar container port but sidecar uses non default protocol": {
+			in: validateExposedPortsOpts{
+				mainContainerName: "mockMainContainer",
+				mainContainerPort: aws.Uint16(8080),
+				sidecarConfig: map[string]*SidecarConfig{
+					"foo": {
+						Port: aws.String("80/udp"),
+					},
+				},
+				nlb: &NetworkLoadBalancerConfiguration{
+					Listener: NetworkLoadBalancerListener{
+						Port:       aws.String("8080"),
+						TargetPort: aws.Int(80),
+					},
+				},
+			},
+			wanted: fmt.Errorf(`validate "nlb": container "foo" is exposing the same port 80 with protocol TCP and UDP`),
 		},
 		"should return an error if alb target_port points to one sidecar container port and target_container points to another sidecar container": {
 			in: validateExposedPortsOpts{
@@ -3966,6 +4336,13 @@ func TestValidateExposedPorts(t *testing.T) {
 				alb: &HTTP{
 					Main: RoutingRule{
 						TargetPort:      aws.Uint16(80),
+						TargetContainer: aws.String("foo"),
+					},
+				},
+				nlb: &NetworkLoadBalancerConfiguration{
+					Listener: NetworkLoadBalancerListener{
+						Port:            aws.String("8080/tcp"),
+						TargetPort:      aws.Int(80),
 						TargetContainer: aws.String("foo"),
 					},
 				},
@@ -4094,6 +4471,34 @@ func TestValidateExposedPorts(t *testing.T) {
 			},
 			wanted: fmt.Errorf(`validate "nlb": containers "nginx" and "foo" are exposing the same port 5001`),
 		},
+		"should return an error if alb and nlb target_port trying to expose same container port with different protocol": {
+			in: validateExposedPortsOpts{
+				mainContainerName: "mockMainContainer",
+				mainContainerPort: aws.Uint16(5000),
+				sidecarConfig: map[string]*SidecarConfig{
+					"foo": {
+						Port: aws.String("8080"),
+					},
+					"nginx": {
+						Port: aws.String("80"),
+					},
+				},
+				alb: &HTTP{
+					Main: RoutingRule{
+						TargetPort:      aws.Uint16(5001),
+						TargetContainer: aws.String("foo"),
+					},
+				},
+				nlb: &NetworkLoadBalancerConfiguration{
+					Listener: NetworkLoadBalancerListener{
+						Port:            aws.String("5001/udp"),
+						TargetPort:      aws.Int(5001),
+						TargetContainer: aws.String("foo"),
+					},
+				},
+			},
+			wanted: fmt.Errorf(`validate "nlb": container "foo" is exposing the same port 5001 with protocol UDP and TCP`),
+		},
 		"should not return an error if nlb is trying to expose multiple ports": {
 			in: validateExposedPortsOpts{
 				mainContainerName: "mockMainContainer",
@@ -4198,6 +4603,48 @@ func TestImageLocationOrBuild_validate(t *testing.T) {
 			in: ImageLocationOrBuild{
 				Location: aws.String("mockLocation"),
 			},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			err := tc.in.validate()
+
+			if tc.wantedError != nil {
+				require.EqualError(t, err, tc.wantedError.Error())
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestStaticSiteConfig_validate(t *testing.T) {
+	testCases := map[string]struct {
+		in          StaticSiteConfig
+		wantedError error
+	}{
+		"should return error if alias is not specified when certificate is set": {
+			in: StaticSiteConfig{
+				HTTP: StaticSiteHTTP{
+					Certificate: "arn:aws:acm:us-east-1:1234567890:certificate/1115a386-a3db-4fb8-9b39-dfed63968129",
+				},
+			},
+			wantedError: fmt.Errorf(`validate "http": "alias" must be specified if "certificate" is specified`),
+		},
+		"should return error if certificate is not in us-east-1": {
+			in: StaticSiteConfig{
+				HTTP: StaticSiteHTTP{
+					Alias:       "foobar.com",
+					Certificate: "arn:aws:acm:us-east-2:1234567890:certificate/1115a386-a3db-4fb8-9b39-dfed63968129",
+				},
+			},
+			wantedError: fmt.Errorf(`validate "http": cdn certificate must be in region us-east-1`),
+		},
+		"should return error if source is missing": {
+			in: StaticSiteConfig{
+				FileUploads: []FileUpload{{}},
+			},
+			wantedError: fmt.Errorf(`validate "files[0]": "source" must be specified`),
 		},
 	}
 	for name, tc := range testCases {

@@ -1,18 +1,17 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-const AWS = require("aws-sdk");
+"use strict";
+const { fromEnv, fromTemporaryCredentials } = require("@aws-sdk/credential-providers");
+const { ACM } = require("@aws-sdk/client-acm");
+const { ResourceGroupsTaggingAPI } = require("@aws-sdk/client-resource-groups-tagging-api");
+const { Route53, ListHostedZonesByNameCommand, ChangeResourceRecordSetsCommand, ListResourceRecordSetsCommand,
+waitUntilResourceRecordSetsChanged } = require("@aws-sdk/client-route-53");
 const ATTEMPTS_VALIDATION_OPTIONS_READY = 10;
 const ATTEMPTS_RECORD_SETS_CHANGE = 10;
 const DELAY_RECORD_SETS_CHANGE_IN_S = 30;
 
-let envHostedZoneID,
-  appName,
-  envName,
-  serviceName,
-  domainTypes,
-  rootDNSRole,
-  domainName;
+let envHostedZoneID, appName, envName, serviceName, domainTypes, rootDNSRole, domainName;
 let defaultSleep = function (ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 };
@@ -22,10 +21,10 @@ const appRoute53Context = () => {
   let client;
   return () => {
     if (!client) {
-      client = new AWS.Route53({
-        credentials: new AWS.ChainableTemporaryCredentials({
+      client = new Route53({
+        credentials: fromTemporaryCredentials({
           params: { RoleArn: rootDNSRole },
-          masterCredentials: new AWS.EnvironmentCredentials("AWS"),
+          masterCredentials: fromEnv("AWS"),
         }),
       });
     }
@@ -37,7 +36,7 @@ const envRoute53Context = () => {
   let client;
   return () => {
     if (!client) {
-      client = new AWS.Route53();
+      client = new Route53();
     }
     return client;
   };
@@ -47,7 +46,7 @@ const acmContext = () => {
   let client;
   return () => {
     if (!client) {
-      client = new AWS.ACM();
+      client = new ACM();
     }
     return client;
   };
@@ -57,7 +56,7 @@ const resourceGroupsTaggingAPIContext = () => {
   let client;
   return () => {
     if (!client) {
-      client = new AWS.ResourceGroupsTaggingAPI();
+      client = new ResourceGroupsTaggingAPI();
     }
     return client;
   };
@@ -113,14 +112,7 @@ let hostedZoneID = {
  * @param {string} [reason] reason for failure, if any, to convey to the user
  * @returns {Promise} Promise that is resolved on success, or rejected on connection error or HTTP error response
  */
-function report(
-  event,
-  context,
-  responseStatus,
-  physicalResourceId,
-  responseData,
-  reason
-) {
+function report(event, context, responseStatus, physicalResourceId, responseData, reason) {
   return new Promise((resolve, reject) => {
     const https = require("https");
     const { URL } = require("url");
@@ -166,10 +158,7 @@ function report(
 exports.handler = async function (event, context) {
   // Destruct resource properties into local variables.
   const props = event.ResourceProperties;
-  let {
-    PublicAccessDNS: publicAccessDNS,
-    PublicAccessHostedZoneID: publicAccessHostedZoneID,
-  } = props;
+  let { PublicAccessDNS: publicAccessDNS, PublicAccessHostedZoneID: publicAccessHostedZoneID } = props;
   const aliases = new Set(props.Aliases);
 
   // Initialize global variables.
@@ -200,20 +189,18 @@ exports.handler = async function (event, context) {
   let handler = async function () {
     switch (event.RequestType) {
       case "Update":
+        // Hosted Zone and DNS are not guaranteed to be the same, 
+        // so we want to be able to update routing in case alias is unchanged but hosted zone or DNS is not.
         let oldAliases = new Set(event.OldResourceProperties.Aliases);
-        if (setEqual(oldAliases, aliases)) {
+        let oldHostedZoneId = event.OldResourceProperties.PublicAccessHostedZoneID;
+        let oldDNS = event.OldResourceProperties.PublicAccessDNS;
+        if (setEqual(oldAliases, aliases) && oldHostedZoneId === publicAccessHostedZoneID && oldDNS === publicAccessDNS) {
           break;
         }
-        await validateAliases(aliases, publicAccessDNS);
+        await validateAliases(aliases, publicAccessDNS, oldDNS);
         await activate(aliases, publicAccessDNS, publicAccessHostedZoneID);
-        let unusedAliases = new Set(
-          [...oldAliases].filter((a) => !aliases.has(a))
-        );
-        await deactivate(
-          unusedAliases,
-          publicAccessDNS,
-          publicAccessHostedZoneID
-        );
+        let unusedAliases = new Set([...oldAliases].filter((a) => !aliases.has(a)));
+        await deactivate(unusedAliases, oldDNS, oldHostedZoneId);
         break;
       case "Create":
         await validateAliases(aliases, publicAccessDNS);
@@ -232,14 +219,7 @@ exports.handler = async function (event, context) {
     await report(event, context, "SUCCESS", physicalResourceID);
   } catch (err) {
     console.log(`Caught error for service ${serviceName}: ${err.message}`);
-    await report(
-      event,
-      context,
-      "FAILED",
-      physicalResourceID,
-      null,
-      err.message
-    );
+    await report(event, context, "FAILED", physicalResourceID, null, err.message);
   }
 };
 
@@ -248,21 +228,21 @@ exports.handler = async function (event, context) {
  *
  * @param {Set<String>} aliases for the service.
  * @param {String} publicAccessDNS the DNS of the service's load balancer.
+ * @param {String} oldPublicAccessDNS the old DNS of the service's load balancer.
  * @throws error if at least one of the aliases is not valid.
  */
-async function validateAliases(aliases, publicAccessDNS) {
+async function validateAliases(aliases, publicAccessDNS, oldPublicAccessDNS) {
   let promises = [];
 
   for (let alias of aliases) {
     let { hostedZoneID, route53Client } = await domainResources(alias);
     const promise = route53Client
-      .listResourceRecordSets({
+      .send(new ListResourceRecordSetsCommand({
         HostedZoneId: hostedZoneID,
         MaxItems: "1",
         StartRecordName: alias,
         StartRecordType: "A",
-      })
-      .promise()
+      }))
       .then(({ ResourceRecordSets: recordSet }) => {
         if (!targetRecordExists(alias, recordSet)) {
           return;
@@ -271,17 +251,14 @@ async function validateAliases(aliases, publicAccessDNS) {
           return;
         }
         let aliasTarget = recordSet[0].AliasTarget;
-        if (
-          aliasTarget &&
-          aliasTarget.DNSName.toLowerCase() ===
-            `${publicAccessDNS.toLowerCase()}.`
-        ) {
+        if (aliasTarget && aliasTarget.DNSName.toLowerCase() === `${publicAccessDNS.toLowerCase()}.`) {
           return; // The record is an alias record and is in use by myself, hence valid.
         }
+        if (aliasTarget && oldPublicAccessDNS && aliasTarget.DNSName.toLowerCase() === `${oldPublicAccessDNS.toLowerCase()}.`) {
+          return; // The record was used by the old DNS, therefore is now used by the current DNS, hence valid.
+        }
         if (aliasTarget) {
-          throw new Error(
-            `Alias ${alias} is already in use by ${aliasTarget.DNSName}. This could be another load balancer of a different service.`
-          );
+          throw new Error(`Alias ${alias} is already in use by ${aliasTarget.DNSName}. This could be another load balancer of a different service.`);
         }
         throw new Error(`Alias ${alias} is already in use`);
       });
@@ -300,9 +277,7 @@ async function validateAliases(aliases, publicAccessDNS) {
 async function activate(aliases, publicAccessDNS, publicAccessHostedZone) {
   let promises = [];
   for (let alias of aliases) {
-    promises.push(
-      activateAlias(alias, publicAccessDNS, publicAccessHostedZone)
-    );
+    promises.push(activateAlias(alias, publicAccessDNS, publicAccessHostedZone));
   }
   await Promise.all(promises);
 }
@@ -334,25 +309,14 @@ async function activateAlias(alias, publicAccessDNS, publicAccessHostedZone) {
 
   let { hostedZoneID, route53Client } = await domainResources(alias);
   let { ChangeInfo } = await route53Client
-    .changeResourceRecordSets({
+    .send(new ChangeResourceRecordSetsCommand({
       ChangeBatch: {
         Comment: `Upsert A-record for alias ${alias}`,
         Changes: changes,
       },
       HostedZoneId: hostedZoneID,
-    })
-    .promise();
-
-  await route53Client
-    .waitFor("resourceRecordSetsChanged", {
-      // Wait up to 5 minutes
-      $waiter: {
-        delay: DELAY_RECORD_SETS_CHANGE_IN_S,
-        maxAttempts: ATTEMPTS_RECORD_SETS_CHANGE,
-      },
-      Id: ChangeInfo.Id,
-    })
-    .promise();
+    }));
+  await exports.waitForRecordChange(route53Client,ChangeInfo.Id);
 }
 
 /**
@@ -365,9 +329,7 @@ async function activateAlias(alias, publicAccessDNS, publicAccessHostedZone) {
 async function deactivate(aliases, publicAccessDNS, publicAccessHostedZoneID) {
   let promises = [];
   for (let alias of aliases) {
-    promises.push(
-      deactivateAlias(alias, publicAccessDNS, publicAccessHostedZoneID)
-    );
+    promises.push(deactivateAlias(alias, publicAccessDNS, publicAccessHostedZoneID));
   }
   await Promise.all(promises);
 }
@@ -380,11 +342,7 @@ async function deactivate(aliases, publicAccessDNS, publicAccessHostedZoneID) {
  * @param {String} publicAccessHostedZoneID
  * @returns {Promise<void>}
  */
-async function deactivateAlias(
-  alias,
-  publicAccessDNS,
-  publicAccessHostedZoneID
-) {
+async function deactivateAlias(alias, publicAccessDNS, publicAccessHostedZoneID) {
   // NOTE: It has been validated that if the alias is in use, it is in use by the service itself.
   // Therefore, an "UPSERT" will not overwrite a record that belongs to another service.
   let changes = [
@@ -412,44 +370,38 @@ async function deactivateAlias(
   };
   let changeInfo;
   try {
-    ({ ChangeInfo: changeInfo } = await route53Client
-      .changeResourceRecordSets(changeResourceRecordSetsInput)
-      .promise());
+    ({ ChangeInfo: changeInfo } = await route53Client.send(new ChangeResourceRecordSetsCommand(changeResourceRecordSetsInput)));
   } catch (e) {
-    let recordSetNotFoundErrMessageRegex = new RegExp(
-      ".*Tried to delete resource record set.*but it was not found.*"
-    );
+    let recordSetNotFoundErrMessageRegex = new RegExp(".*Tried to delete resource record set.*but it was not found.*");
     if (recordSetNotFoundErrMessageRegex.test(e.message)) {
       return; // If we attempt to `DELETE` a record that doesn't exist, the job is already done, skip waiting.
     }
 
-    let recordSetNotMatchedErrMessageRegex = new RegExp(
-      ".*Tried to delete resource record set.*but the values provided do not match the current values.*"
-    );
+    let recordSetNotMatchedErrMessageRegex = new RegExp(".*Tried to delete resource record set.*but the values provided do not match the current values.*");
     if (recordSetNotMatchedErrMessageRegex.test(e.message)) {
       // NOTE: The alias target, or record value is not exactly what we provided
       // E.g. the alias target DNS name is another load balancer or cloudfront distribution
       // This service should not delete the A-record if it is not being pointed to.
       // However, this is an unexpected situation, we should log this information.
-      console.log(
-        `Received error when trying to delete A-record for ${alias}: ${e.message}. Perhaps the alias record isn't pointing to ${publicAccessDNS}.`
-      );
+      console.log(`Received error when trying to delete A-record for ${alias}: ${e.message}. Perhaps the alias record isn't pointing to ${publicAccessDNS}.`);
       return;
     }
     throw new Error(`delete record ${alias}: ` + e.message);
   }
-
-  await route53Client
-    .waitFor("resourceRecordSetsChanged", {
-      // Wait up to 5 minutes
-      $waiter: {
-        delay: DELAY_RECORD_SETS_CHANGE_IN_S,
-        maxAttempts: ATTEMPTS_RECORD_SETS_CHANGE,
-      },
-      Id: changeInfo.Id,
-    })
-    .promise();
+  await exports.waitForRecordChange(route53Client,changeInfo.Id);
 }
+
+const waitForRecordChange = async function (route53, changeId) {
+  // wait upto 5 minutes.
+  await waitUntilResourceRecordSetsChanged({
+    client: route53,
+    maxWaitTime: ATTEMPTS_RECORD_SETS_CHANGE * DELAY_RECORD_SETS_CHANGE_IN_S,
+    minDelay: DELAY_RECORD_SETS_CHANGE_IN_S,
+    maxDelay: DELAY_RECORD_SETS_CHANGE_IN_S,
+    },{
+    Id: changeId,
+  });
+};
 
 /**
  * Validate if the exact record exits in the set of records.
@@ -467,15 +419,12 @@ function targetRecordExists(targetDomainName, recordSet) {
 async function hostedZoneIDByName(domain) {
   const { HostedZones } = await clients.app
     .route53()
-    .listHostedZonesByName({
-      DNSName: domain,
-      MaxItems: "1",
-    })
-    .promise();
+    .send(new ListHostedZonesByNameCommand({
+        DNSName: domain,
+        MaxItems: "1",
+    }));
   if (!HostedZones || HostedZones.length === 0) {
-    throw new Error(
-      `Couldn't find any Hosted Zone with DNS name ${domainName}.`
-    );
+    throw new Error(`Couldn't find any Hosted Zone with DNS name ${domainName}.`);
   }
   return HostedZones[0].Id.split("/").pop();
 }
@@ -502,9 +451,7 @@ async function domainResources(alias) {
       hostedZoneID: await hostedZoneID.root(),
     };
   }
-  throw new UnrecognizedDomainTypeError(
-    `unrecognized domain type for ${alias}`
-  );
+  throw new UnrecognizedDomainTypeError(`unrecognized domain type for ${alias}`);
 }
 
 function setEqual(setA, setB) {
@@ -534,11 +481,7 @@ UnrecognizedDomainTypeError.prototype = Object.create(Error.prototype, {
 
 exports.deadlineExpired = function () {
   return new Promise(function (resolve, reject) {
-    setTimeout(
-      reject,
-      14 * 60 * 1000 + 30 * 1000 /* 14.5 minutes*/,
-      new Error(`Lambda took longer than 14.5 minutes to update custom domain`)
-    );
+    setTimeout(reject, 14 * 60 * 1000 + 30 * 1000 /* 14.5 minutes*/, new Error(`Lambda took longer than 14.5 minutes to update custom domain`));
   });
 };
 
@@ -552,3 +495,6 @@ exports.withDeadlineExpired = function (d) {
   exports.deadlineExpired = d;
 };
 exports.attemptsValidationOptionsReady = ATTEMPTS_VALIDATION_OPTIONS_READY;
+exports.waitForRecordChange = function (route53, changeId) {
+  return waitForRecordChange(route53, changeId);
+}

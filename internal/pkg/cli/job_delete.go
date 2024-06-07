@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ssm"
@@ -21,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/copilot-cli/internal/pkg/aws/ecr"
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
+	clideploy "github.com/aws/copilot-cli/internal/pkg/cli/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
@@ -298,13 +300,12 @@ func (o *deleteJobOpts) needsAppCleanup() bool {
 func (o *deleteJobOpts) emptyECRRepos(envs []*config.Environment) error {
 	var uniqueRegions []string
 	for _, env := range envs {
-		if !contains(env.Region, uniqueRegions) {
+		if !slices.Contains(uniqueRegions, env.Region) {
 			uniqueRegions = append(uniqueRegions, env.Region)
 		}
 	}
 
-	// TODO: centralized ECR repo name
-	repoName := fmt.Sprintf("%s/%s", o.appName, o.name)
+	repoName := clideploy.RepoName(o.appName, o.name)
 	for _, region := range uniqueRegions {
 		sess, err := o.sess.DefaultWithRegion(region)
 		if err != nil {

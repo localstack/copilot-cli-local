@@ -26,7 +26,7 @@ List of all available properties for a `'Load Balanced Web Service'` manifest. T
         secrets:
           GITHUB_TOKEN: GITHUB_TOKEN
           DB_SECRET:
-            secretsmanager: '${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/mysql'
+            secretsmanager: 'mysql'
         ```
 
     === "With a domain"
@@ -241,7 +241,7 @@ List of all available properties for a `'Load Balanced Web Service'` manifest. T
 
         nlb:
           port: 8080/tcp              # Traffic on port 8080/tcp is forwarded to the main container, on port 8080.
-          additional_rules:  
+          additional_listeners:  
             - port: 8084/tcp          # Traffic on port 8084/tcp is forwarded to the main container, on port 8084.
             - port: 8085/tcp          # Traffic on port 8085/tcp is forwarded to the sidecar "envoy", on port 3000.
               target_port: 3000         
@@ -282,6 +282,9 @@ at least one of Application Load Balancer or Network Load Balancer must be enabl
 
 <span class="parent-field">http.</span><a id="http-path" href="#http-path" class="field">`path`</a> <span class="type">String</span>  
 Requests to this path will be forwarded to your service. Each listener rule should listen on a unique path.
+
+<span class="parent-field">http.</span><a id="http-alb" href="#http-alb" class="field">`alb`</a> <span class="type">String</span> <span class="version">Added in [v1.32.0](../../blogs/release-v132.en.md#imported-albs)</span>  
+The ARN or name of an existing public-facing ALB to import. Listener rules will be added to your listener(s). Copilot will not manage DNS-related resources like certificates. 
 
 {% include 'http-healthcheck.en.md' %}
 

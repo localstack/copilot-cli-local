@@ -4,6 +4,8 @@
 package manifest
 
 import (
+	"maps"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/template"
@@ -101,6 +103,11 @@ func (s *BackendService) requiredEnvironmentFeatures() []string {
 	return features
 }
 
+// Dockerfile returns the relative path of the Dockerfile in the manifest.
+func (s *BackendService) Dockerfile() string {
+	return s.ImageConfig.Image.dockerfilePath()
+}
+
 // Port returns the exposed port in the manifest.
 // If the backend service is not meant to be reachable, then ok is set to false.
 func (s *BackendService) Port() (port uint16, ok bool) {
@@ -135,6 +142,12 @@ func (s *BackendService) BuildArgs(contextDir string) (map[string]*DockerBuildAr
 // and the values are either env file paths or empty strings.
 func (s *BackendService) EnvFiles() map[string]string {
 	return envFiles(s.Name, s.TaskConfig, s.Logging, s.Sidecars)
+}
+
+// ContainerDependencies returns a map of ContainerDependency objects for the BackendService
+// including dependencies for its main container, any logging sidecar, and additional sidecars.
+func (s *BackendService) ContainerDependencies() map[string]ContainerDependency {
+	return containerDependencies(aws.StringValue(s.Name), s.ImageConfig.Image, s.Logging, s.Sidecars)
 }
 
 func (s *BackendService) subnets() *SubnetListOrArgs {
@@ -199,21 +212,21 @@ func newDefaultBackendService() *BackendService {
 
 // ExposedPorts returns all the ports that are container ports available to receive traffic.
 func (b *BackendService) ExposedPorts() (ExposedPortsIndex, error) {
-	var exposedPorts []ExposedPort
+	exposedPorts := make(map[uint16]ExposedPort)
 
 	workloadName := aws.StringValue(b.Name)
-	exposedPorts = append(exposedPorts, b.ImageConfig.exposedPorts(workloadName)...)
 	for name, sidecar := range b.Sidecars {
-		out, err := sidecar.exposedPorts(name)
+		newExposedPorts, err := sidecar.exposePorts(exposedPorts, name)
 		if err != nil {
 			return ExposedPortsIndex{}, err
 		}
-		exposedPorts = append(exposedPorts, out...)
+		maps.Copy(exposedPorts, newExposedPorts)
 	}
 	for _, rule := range b.HTTP.RoutingRules() {
-		exposedPorts = append(exposedPorts, rule.exposedPorts(exposedPorts, workloadName)...)
+		maps.Copy(exposedPorts, rule.exposePorts(exposedPorts, workloadName))
 	}
-	portsForContainer, containerForPort := prepareParsedExposedPortsMap(sortExposedPorts(exposedPorts))
+	maps.Copy(exposedPorts, b.ImageConfig.exposePorts(exposedPorts, workloadName))
+	portsForContainer, containerForPort := prepareParsedExposedPortsMap(exposedPorts)
 	return ExposedPortsIndex{
 		WorkloadName:      workloadName,
 		PortsForContainer: portsForContainer,

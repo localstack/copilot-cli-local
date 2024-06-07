@@ -6,6 +6,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ssm"
@@ -41,7 +42,7 @@ func newOverrideEnvOpts(vars overrideVars) (*overrideEnvOpts, error) {
 		return nil, fmt.Errorf("default session: %v", err)
 	}
 	cfgStore := config.NewSSMStore(identity.New(defaultSess), ssm.New(defaultSess), aws.StringValue(defaultSess.Config.Region))
-
+	vars.requiresEnv = true
 	prompt := prompt.New()
 	cmd := &overrideEnvOpts{
 		overrideOpts: &overrideOpts{
@@ -91,7 +92,7 @@ func (o *overrideEnvOpts) validateName() error {
 	if err != nil {
 		return fmt.Errorf("list environments in the workspace: %v", err)
 	}
-	if !contains(o.name, names) {
+	if !slices.Contains(names, o.name) {
 		return fmt.Errorf("environment %q does not exist in the workspace", o.name)
 	}
 	return nil
@@ -99,7 +100,7 @@ func (o *overrideEnvOpts) validateName() error {
 
 func (o *overrideEnvOpts) newEnvPackageCmd(tplBuf stringWriteCloser) (executor, error) {
 	cmd, err := newPackageEnvOpts(packageEnvVars{
-		envName: o.name,
+		name:    o.name,
 		appName: o.appName,
 	})
 	if err != nil {

@@ -95,7 +95,10 @@ func convertSidecars(s map[string]*manifest.SidecarConfig, exposedPorts map[stri
 	sort.Strings(keys)
 	for _, name := range keys {
 		config := s[name]
-		imageURI := rc.PushedImages[name].URI()
+		var imageURI string
+		if image, ok := rc.PushedImages[name]; ok {
+			imageURI = image.URI()
+		}
 		if uri, hasLocation := config.ImageURI(); hasLocation {
 			imageURI = uri
 		}
@@ -371,12 +374,12 @@ func convertHTTPHealthCheck(hc *manifest.HealthCheckArgsOrString) template.HTTPH
 		return opts
 	}
 	if hc.IsBasic() {
-		opts.HealthCheckPath = hc.Basic
+		opts.HealthCheckPath = convertPath(hc.Basic)
 		return opts
 	}
 
 	if hc.Advanced.Path != nil {
-		opts.HealthCheckPath = *hc.Advanced.Path
+		opts.HealthCheckPath = convertPath(*hc.Advanced.Path)
 	}
 	if hc.Advanced.Port != nil {
 		opts.Port = strconv.Itoa(aws.IntValue(hc.Advanced.Port))
@@ -573,6 +576,23 @@ type routingRuleConfigConverter struct {
 	redirectToHTTPS bool
 }
 
+// convertPath attempts to standardize manifest paths on '/path' or '/' patterns.
+//   - If the path starts with a / (including '/'), return it unmodified.
+//   - Otherwise, prepend a leading '/' character.
+//
+// CFN health check and path patterns expect a leading '/', so we do that here instead of in the template.
+//
+// Empty strings, if they make it to this point, are converted to '/'.
+func convertPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if path[0] == '/' {
+		return path
+	}
+	return "/" + path
+}
+
 func (conv routingRuleConfigConverter) convert() (*template.ALBListenerRule, error) {
 	var aliases []string
 	var err error
@@ -594,7 +614,7 @@ func (conv routingRuleConfigConverter) convert() (*template.ALBListenerRule, err
 	}
 
 	config := &template.ALBListenerRule{
-		Path:                aws.StringValue(conv.rule.Path),
+		Path:                convertPath(aws.StringValue(conv.rule.Path)),
 		TargetContainer:     targetContainer,
 		TargetPort:          targetPort,
 		Aliases:             aliases,
@@ -673,7 +693,6 @@ func (s *LoadBalancedWebService) convertNetworkLoadBalancer() (networkLoadBalanc
 
 	config := networkLoadBalancerConfig{
 		settings: &template.NetworkLoadBalancer{
-			PublicSubnetCIDRs:   s.publicSubnetCIDRBlocks,
 			Listener:            listeners,
 			Aliases:             aliases,
 			MainContainerPort:   s.manifest.MainContainerPort(),
@@ -699,6 +718,34 @@ func (s *LoadBalancedWebService) convertGracePeriod() *int64 {
 	return aws.Int64(int64(manifest.DefaultHealthCheckGracePeriod))
 }
 
+func (s *LoadBalancedWebService) convertImportedALB() (*template.ImportedALB, error) {
+	if s.importedALB == nil {
+		return nil, nil
+	}
+	var listeners []template.LBListener
+	for _, listener := range s.importedALB.Listeners {
+		listeners = append(listeners, template.LBListener{
+			ARN:      listener.ARN,
+			Port:     listener.Port,
+			Protocol: listener.Protocol,
+		})
+	}
+	var securityGroups []template.LBSecurityGroup
+	for _, sg := range s.importedALB.SecurityGroups {
+		securityGroups = append(securityGroups, template.LBSecurityGroup{
+			ID: sg,
+		})
+	}
+	return &template.ImportedALB{
+		Name:           s.importedALB.Name,
+		ARN:            s.importedALB.ARN,
+		DNSName:        s.importedALB.DNSName,
+		HostedZoneID:   s.importedALB.HostedZoneID,
+		Listeners:      listeners,
+		SecurityGroups: securityGroups,
+	}, nil
+}
+
 func convertExecuteCommand(e *manifest.ExecuteCommand) *template.ExecuteCommandOpts {
 	if e.Config.IsEmpty() && !aws.BoolValue(e.Enable) {
 		return nil
@@ -714,9 +761,15 @@ func convertAllowedSourceIPs(allowedSourceIPs []manifest.IPNet) []string {
 	return sourceIPs
 }
 
-func convertServiceConnect(s manifest.ServiceConnectBoolOrArgs) *template.ServiceConnect {
-	return &template.ServiceConnect{
-		Alias: s.ServiceConnectArgs.Alias,
+func convertServiceConnectServer(s manifest.ServiceConnectBoolOrArgs, target *manifest.ServiceConnectTargetContainer) *template.ServiceConnectServer {
+	if target == nil || target.Port == "" || target.Port == template.NoExposedContainerPort {
+		return nil
+	}
+
+	return &template.ServiceConnectServer{
+		Name:  target.Container,
+		Port:  target.Port,
+		Alias: aws.StringValue(s.Alias),
 	}
 }
 
@@ -801,16 +854,33 @@ func convertMountPoints(input map[string]*manifest.Volume) []*template.MountPoin
 	if len(input) == 0 {
 		return nil
 	}
+
+	// Sort by names for consistent testing
+	var names []string
+	for name := range input {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var output []*template.MountPoint
-	for name, volume := range input {
+	for _, name := range names {
+		volume := input[name]
 		output = append(output, convertMountPoint(aws.String(name), volume.ContainerPath, volume.ReadOnly))
 	}
 	return output
 }
 
 func convertEFSPermissions(input map[string]*manifest.Volume) []*template.EFSPermission {
+	// Sort by names for consistent testing
+	var names []string
+	for name := range input {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var output []*template.EFSPermission
-	for _, volume := range input {
+	for _, name := range names {
+		volume := input[name]
 		// If there's no EFS configuration, we don't need to generate any permissions.
 		if volume.EmptyVolume() {
 			continue
@@ -833,15 +903,23 @@ func convertEFSPermissions(input map[string]*manifest.Volume) []*template.EFSPer
 		output = append(output, &template.EFSPermission{
 			Write:         write,
 			AccessPointID: accessPointID,
-			FilesystemID:  volume.EFS.Advanced.FileSystemID,
+			FilesystemID:  convertFileSystemID(volume.EFS.Advanced),
 		})
 	}
 	return output
 }
 
 func convertManagedFSInfo(wlName *string, input map[string]*manifest.Volume) *template.ManagedVolumeCreationInfo {
+	// Sort by names for consistent testing
+	var names []string
+	for name := range input {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var output *template.ManagedVolumeCreationInfo
-	for name, volume := range input {
+	for _, name := range names {
+		volume := input[name]
 		if volume.EmptyVolume() || !volume.EFS.UseManagedFS() {
 			continue
 		}
@@ -870,8 +948,16 @@ func getRandomUIDGID(name *string) uint32 {
 }
 
 func convertVolumes(input map[string]*manifest.Volume) []*template.Volume {
+	// Sort by names for consistent testing
+	var names []string
+	for name := range input {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var output []*template.Volume
-	for name, volume := range input {
+	for _, name := range names {
+		volume := input[name]
 		// Volumes can contain either:
 		//   a) an EFS configuration, which must be valid
 		//   b) no EFS configuration, in which case the volume is created using task scratch storage in order to share
@@ -915,7 +1001,7 @@ func convertEFSConfiguration(in manifest.EFSVolumeConfiguration) *template.EFSVo
 	iam := aws.String(defaultIAM)
 	if in.AuthConfig.IsEmpty() {
 		return &template.EFSVolumeConfiguration{
-			Filesystem:    in.FileSystemID,
+			Filesystem:    convertFileSystemID(in),
 			RootDirectory: rootDir,
 			IAM:           iam,
 		}
@@ -926,11 +1012,18 @@ func convertEFSConfiguration(in manifest.EFSVolumeConfiguration) *template.EFSVo
 	}
 
 	return &template.EFSVolumeConfiguration{
-		Filesystem:    in.FileSystemID,
+		Filesystem:    convertFileSystemID(in),
 		RootDirectory: rootDir,
 		IAM:           iam,
 		AccessPointID: in.AuthConfig.AccessPointID,
 	}
+}
+
+func convertFileSystemID(in manifest.EFSVolumeConfiguration) template.FileSystemID {
+	if in.FileSystemID.Plain != nil {
+		return template.PlainFileSystemID(aws.StringValue(in.FileSystemID.Plain))
+	}
+	return template.ImportedFileSystemID(aws.StringValue(in.FileSystemID.FromCFN.Name))
 }
 
 func convertNetworkConfig(network manifest.NetworkConfig) template.NetworkOpts {

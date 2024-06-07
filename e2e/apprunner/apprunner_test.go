@@ -27,6 +27,7 @@ var _ = Describe("App Runner", Ordered, func() {
 	BeforeAll(func() {
 		_, initErr = cli.Init(&client.InitRequest{
 			AppName:      appName,
+			EnvName:      envName,
 			WorkloadName: feSvcName,
 			ImageTag:     "gallopinggurdey",
 			Dockerfile:   "./front-end/Dockerfile",
@@ -168,17 +169,13 @@ var _ = Describe("App Runner", Ordered, func() {
 
 		It("should return correct secrets", func() {
 			fmt.Printf("\n\nsecrets: %+v\n\n", svc.Secrets)
-			expectedSecrets := map[string]string{
-				"my-ssm-param": "e2e-apprunner-ssm-param",
-				"USER_CREDS":   "e2e-apprunner-MyTestSecret",
-			}
-			for _, secret := range svc.Secrets {
-				if secret.Name == "my-ssm-param" {
-					Expect(secret.Value).To(Equal(expectedSecrets[secret.Name]))
+			for _, envVar := range svc.Secrets {
+				if envVar.Name == "my-ssm-param" {
+					Expect(envVar.Value).To(Equal(ssmName))
 				}
-				if secret.Name == "USER_CREDS" {
-					containsSecret := strings.Contains(expectedSecrets[secret.Name], expectedSecrets[secret.Name])
-					Expect(containsSecret).To(Equal(true))
+				if envVar.Name == "USER_CREDS" {
+					valueFromARN := envVar.Value // E.g. arn:aws:secretsmanager:ap-northeast-1:1111111111:secret:e2e-apprunner-my-secret
+					Expect(strings.Contains(valueFromARN, secretName)).To(BeTrue())
 				}
 			}
 		})
@@ -244,7 +241,7 @@ var _ = Describe("App Runner", Ordered, func() {
 				Since:   "1h",
 			})
 			return svcLogs, svcLogsErr
-		}, "120s", "10s").ShouldNot(BeEmpty())
+		}, "300s", "10s").ShouldNot(BeEmpty())
 
 		for _, logLine := range svcLogs {
 			Expect(logLine.Message).NotTo(Equal(""))

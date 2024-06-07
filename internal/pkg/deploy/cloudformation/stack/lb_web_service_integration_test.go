@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/copilot-cli/internal/pkg/addon"
+	"github.com/aws/copilot-cli/internal/pkg/aws/elbv2"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/workspace"
@@ -35,11 +36,31 @@ func TestLoadBalancedWebService_TemplateInteg(t *testing.T) {
 		envName       string
 		svcStackPath  string
 		svcParamsPath string
+		mockImportALB *elbv2.LoadBalancer
 	}{
 		"default env": {
 			envName:       "test",
 			svcStackPath:  "svc-test.stack.yml",
 			svcParamsPath: "svc-test.params.json",
+			mockImportALB: &elbv2.LoadBalancer{
+				ARN:     "mockImportALBARN",
+				Name:    "mockImportALBName",
+				DNSName: "mockImportALBDNSName",
+				Listeners: []elbv2.Listener{
+					{
+						ARN:      "MockListenerARN1",
+						Port:     80,
+						Protocol: "HTTPS",
+					},
+					{
+						ARN:      "MockListenerARN1",
+						Port:     443,
+						Protocol: "HTTP",
+					},
+				},
+				SecurityGroups: []string{"mockImportALBSG1", "mockImportALBSG2"},
+				HostedZoneID:   "mockHostedZoneID",
+			},
 		},
 		"staging env": {
 			envName:       "staging",
@@ -102,18 +123,24 @@ func TestLoadBalancedWebService_TemplateInteg(t *testing.T) {
 			},
 		}
 		envConfig.HTTPConfig.Public.Certificates = []string{"mockCertARN"}
+		var opts []stack.LoadBalancedWebServiceOption
+		if tc.mockImportALB != nil {
+			opts = append(opts, stack.WithImportedALB(tc.mockImportALB))
+		}
 		serializer, err := stack.NewLoadBalancedWebService(stack.LoadBalancedWebServiceConfig{
 			App:                &config.Application{Name: appName},
 			EnvManifest:        envConfig,
 			Manifest:           v,
 			ArtifactBucketName: "bucket",
+			ArtifactKey:        "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
 			RuntimeConfig: stack.RuntimeConfig{
 				ServiceDiscoveryEndpoint: svcDiscoveryEndpointName,
 				AccountID:                "123456789123",
 				Region:                   "us-west-2",
 				EnvVersion:               "v1.42.0",
+				Version:                  "v1.29.0",
 			},
-		})
+		}, opts...)
 		require.NoError(t, err, "stack should be able to be initialized")
 		tpl, err := serializer.Template()
 		require.NoError(t, err, "template should render")

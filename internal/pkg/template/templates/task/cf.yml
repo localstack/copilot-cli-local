@@ -273,6 +273,11 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       LifecycleConfiguration:
         Rules:
           # .env files are only needed on the initial RunTask call and are not needed after that.
@@ -281,6 +286,9 @@ Resources:
             Status: Enabled
             Prefix: 'manual/env-files'
             ExpirationInDays: 1
+            NoncurrentVersionExpirationInDays: 1 # Permanently delete noncurrent versions of objects
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
   S3BucketPolicy:
     Metadata:
       'aws:copilot:description': 'A policy to allow file uploads to the S3 bucket'
@@ -300,6 +308,11 @@ Resources:
             Principal:
               AWS:
                 - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+              {{- if and .App .Env }}
+              AWS:
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/{{ .App }}-{{ .Env }}-EnvManagerRole'
+              {{- end}}
+
 Outputs:
   ECRRepo:
     Description: ECR Repo used to store images of task.

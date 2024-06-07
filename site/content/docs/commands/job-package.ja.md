@@ -10,13 +10,15 @@ $ copilot job package
 ## フラグ
 
 ```
+      --allow-downgrade     Optional. Allow using an older version of Copilot to update Copilot components
+                            updated by a newer version of Copilot.
   -a, --app string          Name of the application.
       --diff                Compares the generated CloudFormation template to the deployed stack.
   -e, --env string          Name of the environment.
   -h, --help                help for package
   -n, --name string         Name of the job.
       --output-dir string   Optional. Writes the stack template and template configuration to a directory.
-      --tag string          Optional. The container image tag.
+      --tag string          Optional. The tag for the container images Copilot builds from Dockerfiles.
       --upload-assets       Optional. Whether to upload assets (container images, Lambda functions, etc.).
                             Uploaded asset locations are filled in the template configuration.
 ```

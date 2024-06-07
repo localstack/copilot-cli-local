@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a scheduled job on Amazon ECS. 
+Metadata:
+  Version: v1.29.0
 Parameters: 
   AppName:
     Type: String
@@ -29,6 +31,9 @@ Parameters:
     Description: 'URL of the environment file.'
     Type: String
     Default: ""
+  ArtifactKeyARN:
+    Type: String
+    Description: 'KMS Key used for encrypting artifacts'
   EnvFileARNFornginx:
     Description: 'URL of the environment file for the nginx sidecar.'
     Type: String
@@ -68,7 +73,7 @@ Resources:
       Timeout: 900
       MemorySize: 512
       Role: !GetAtt 'EnvControllerRole.Arn'
-      Runtime: nodejs16.x
+      Runtime: nodejs20.x
 
   EnvControllerRole:
     Metadata:
@@ -281,7 +286,17 @@ Resources:
                 Action:
                   - 'kms:Decrypt'
                 Resource:
+                  - !Ref ArtifactKeyARN
+              - Sid: DecryptTaggedKMSKey
+                Effect: 'Allow'
+                Action:
+                  - 'kms:Decrypt'
+                Resource:
                   - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/copilot-application': !Sub '${AppName}'
+                    'aws:ResourceTag/copilot-environment': !Sub '${EnvName}'
         - !If
           - HasEnvFile
           - PolicyName: !Join ['', [!Ref AppName, '-', !Ref EnvName, '-', !Ref WorkloadName, GetEnvFilePolicy]]
@@ -343,21 +358,13 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: 'sts:AssumeRole'
       Policies:
-        - PolicyName: 'DenyIAMExceptTaggedRoles'
+        - PolicyName: 'DenyIAM'
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: 'Deny'
                 Action: 'iam:*'
                 Resource: '*'
-              - Effect: 'Allow'
-                Action: 'sts:AssumeRole'
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
-                Condition:
-                  StringEquals:
-                    'iam:ResourceTag/copilot-application': !Sub '${AppName}'
-                    'iam:ResourceTag/copilot-environment': !Sub '${EnvName}'
         - PolicyName: 'GrantAccessCopilotManagedEFS'
           PolicyDocument:
             Version: '2012-10-17'
@@ -445,8 +452,7 @@ Resources:
         SecurityGroups:
           Fn::Join:
           - '","'
-          - - Fn::ImportValue: !Sub "${AppName}-${EnvName}-EnvironmentSecurityGroup"
-            - sg-0c10c4fe23f5e5361
+          - - sg-0c10c4fe23f5e5361
             - sg-09295097b2a41b59d
             - Fn::ImportValue: MyUserDBAccessSecurityGroup1
             - Fn::ImportValue: MyUserDBAccessSecurityGroup2

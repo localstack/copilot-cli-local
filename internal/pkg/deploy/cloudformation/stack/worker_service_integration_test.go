@@ -69,12 +69,14 @@ func TestWorkerService_Template(t *testing.T) {
 		Env:                envName,
 		Manifest:           v,
 		ArtifactBucketName: "bucket",
-		RawManifest:        manifestBytes,
+		ArtifactKey:        "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+		RawManifest:        string(manifestBytes),
 		RuntimeConfig: stack.RuntimeConfig{
 			ServiceDiscoveryEndpoint: "test.my-app.local",
 			AccountID:                "123456789123",
 			Region:                   "us-west-2",
 			EnvVersion:               "v1.42.0",
+			Version:                  "v1.29.0",
 		},
 	})
 

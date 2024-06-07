@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a request driven web service on AWS App Runner.
+Metadata:
+  Version: v1.29.0
 Parameters:
   AppName:
     Type: String
@@ -38,6 +40,9 @@ Parameters:
     Description: 'URL of the addons nested stack template within the S3 bucket.'
     Type: String
     Default: ''
+  ArtifactKeyARN:
+    Type: String
+    Description: 'KMS Key used for encrypting artifacts'
 
 Conditions:
   # App Runner will not accept an AccessRole for ImageRepositoryTypes other than ECR.
@@ -90,21 +95,13 @@ Resources:
                 - tasks.apprunner.amazonaws.com
             Action: 'sts:AssumeRole'
       Policies:
-        - PolicyName: 'DenyIAMExceptTaggedRoles'
+        - PolicyName: 'DenyIAM'
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: 'Deny'
                 Action: 'iam:*'
                 Resource: '*'
-              - Effect: 'Allow'
-                Action: 'sts:AssumeRole'
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
-                Condition:
-                  StringEquals:
-                    'iam:ResourceTag/copilot-application': !Sub '${AppName}'
-                    'iam:ResourceTag/copilot-environment': !Sub '${EnvName}'
         - PolicyName: 'Publish2SNS'
           PolicyDocument:
             Version: '2012-10-17'

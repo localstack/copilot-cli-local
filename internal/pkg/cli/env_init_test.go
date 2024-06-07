@@ -38,6 +38,7 @@ type initEnvMocks struct {
 	ec2Client    *mocks.Mockec2Client
 	selApp       *mocks.MockappSelector
 	store        *mocks.Mockstore
+	envLister    *mocks.MockwsEnvironmentsLister
 	wsAppName    string
 }
 
@@ -101,7 +102,7 @@ func TestInitEnvOpts_Validate(t *testing.T) {
 				m.wsAppName = "phonetool"
 				m.store.EXPECT().GetApplication("phonetool").Return(nil, nil)
 			},
-			wantedErrMsg: fmt.Sprintf("environment name 123env is invalid: %s", errValueBadFormat),
+			wantedErrMsg: fmt.Sprintf("environment name 123env is invalid: %s", errBasicNameRegexNotMatched),
 		},
 		"should error if environment already exists": {
 			inEnvName: "test-pdx",
@@ -111,8 +112,20 @@ func TestInitEnvOpts_Validate(t *testing.T) {
 				m.wsAppName = "phonetool"
 				m.store.EXPECT().GetApplication("phonetool").Return(nil, nil)
 				m.store.EXPECT().GetEnvironment("phonetool", "test-pdx").Return(nil, nil)
+				m.envLister.EXPECT().ListEnvironments().Return([]string{}, nil)
 			},
 			wantedErrMsg: "environment test-pdx already exists",
+		},
+		"should skip error if environment already exists in current workspace": {
+			inEnvName: "test-pdx",
+			inAppName: "phonetool",
+
+			setupMocks: func(m *initEnvMocks) {
+				m.wsAppName = "phonetool"
+				m.store.EXPECT().GetApplication("phonetool").Return(nil, nil)
+				m.store.EXPECT().GetEnvironment("phonetool", "test-pdx").Return(nil, nil)
+				m.envLister.EXPECT().ListEnvironments().Return([]string{"test-pdx"}, nil)
+			},
 		},
 		"cannot specify both vpc resources importing flags and configuring flags": {
 			inEnvName: "test-pdx",
@@ -270,7 +283,8 @@ func TestInitEnvOpts_Validate(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 			m := &initEnvMocks{
-				store: mocks.NewMockstore(ctrl),
+				store:     mocks.NewMockstore(ctrl),
+				envLister: mocks.NewMockwsEnvironmentsLister(ctrl),
 			}
 			if tc.setupMocks != nil {
 				tc.setupMocks(m)
@@ -302,6 +316,7 @@ func TestInitEnvOpts_Validate(t *testing.T) {
 				},
 				store:     m.store,
 				wsAppName: m.wsAppName,
+				envLister: m.envLister,
 			}
 
 			// WHEN
@@ -356,7 +371,8 @@ func TestInitEnvOpts_Ask(t *testing.T) {
 		inAdjustVPCVars      adjustVPCVars
 		inInternalALBSubnets []string
 
-		setupMocks func(mocks initEnvMocks)
+		getMockCredsSelector func() (credsSelector, error)
+		setupMocks           func(mocks initEnvMocks)
 
 		wantedError error
 	}{
@@ -379,9 +395,29 @@ func TestInitEnvOpts_Ask(t *testing.T) {
 						Get(envInitNamePrompt, envInitNameHelpPrompt, gomock.Any(), gomock.Any()).
 						Return("test", nil),
 					m.store.EXPECT().GetEnvironment(mockApp, mockEnv).Return(nil, nil),
+					m.envLister.EXPECT().ListEnvironments().Return([]string{}, nil),
 				)
 			},
 			wantedError: errors.New("environment test already exists"),
+		},
+		"should skip error if environment already exists in workspace": {
+			inAppName: mockApp,
+			inProfile: mockProfile,
+			inDefault: true,
+			setupMocks: func(m initEnvMocks) {
+				gomock.InOrder(
+					m.prompt.EXPECT().
+						Get(envInitNamePrompt, envInitNameHelpPrompt, gomock.Any(), gomock.Any()).
+						Return("test", nil),
+					m.store.EXPECT().GetEnvironment(mockApp, mockEnv).Return(nil, nil),
+					m.envLister.EXPECT().ListEnvironments().Return([]string{mockEnv}, nil),
+					m.sessProvider.EXPECT().FromProfile(mockProfile).Return(&session.Session{
+						Config: &aws.Config{
+							Region: aws.String("us-west-2"),
+						},
+					}, nil).AnyTimes(),
+				)
+			},
 		},
 		"should create a session from a named profile if flag is provided": {
 			inAppName: mockApp,
@@ -414,6 +450,21 @@ func TestInitEnvOpts_Ask(t *testing.T) {
 			inDefault: true,
 			setupMocks: func(m initEnvMocks) {
 				m.selCreds.EXPECT().Creds("Which credentials would you like to use to create test?", gomock.Any()).Return(mockSession, nil)
+			},
+		},
+		"should fallback on default session if credentials cant be found": {
+			inAppName: mockApp,
+			inEnv:     mockEnv,
+			inDefault: true,
+			getMockCredsSelector: func() (credsSelector, error) {
+				return nil, mockErr
+			},
+			setupMocks: func(m initEnvMocks) {
+				m.sessProvider.EXPECT().Default().Return(&session.Session{
+					Config: &aws.Config{
+						Region: aws.String("us-west-2"),
+					},
+				}, nil)
 			},
 		},
 		"should prompt for region if user configuration does not have one": {
@@ -904,6 +955,7 @@ func TestInitEnvOpts_Ask(t *testing.T) {
 				ec2Client:    mocks.NewMockec2Client(ctrl),
 				selApp:       mocks.NewMockappSelector(ctrl),
 				store:        mocks.NewMockstore(ctrl),
+				envLister:    mocks.NewMockwsEnvironmentsLister(ctrl),
 			}
 
 			tc.setupMocks(mocks)
@@ -923,12 +975,16 @@ func TestInitEnvOpts_Ask(t *testing.T) {
 				sessProvider: mocks.sessProvider,
 				selVPC:       mocks.selVPC,
 				selCreds: func() (credsSelector, error) {
+					if tc.getMockCredsSelector != nil {
+						return tc.getMockCredsSelector()
+					}
 					return mocks.selCreds, nil
 				},
 				ec2Client: mocks.ec2Client,
 				prompt:    mocks.prompt,
 				selApp:    mocks.selApp,
 				store:     mocks.store,
+				envLister: mocks.envLister,
 			}
 
 			// WHEN
@@ -946,30 +1002,52 @@ func TestInitEnvOpts_Ask(t *testing.T) {
 }
 
 type initEnvExecuteMocks struct {
-	store          *mocks.Mockstore
-	deployer       *mocks.Mockdeployer
-	identity       *mocks.MockidentityService
-	progress       *mocks.Mockprogress
-	iam            *mocks.MockroleManager
-	cfn            *mocks.MockstackExistChecker
-	appCFN         *mocks.MockappResourcesGetter
-	manifestWriter *mocks.MockenvironmentManifestWriter
+	store            *mocks.Mockstore
+	deployer         *mocks.Mockdeployer
+	identity         *mocks.MockidentityService
+	progress         *mocks.Mockprogress
+	iam              *mocks.MockroleManager
+	cfn              *mocks.MockstackExistChecker
+	appCFN           *mocks.MockappResourcesGetter
+	manifestWriter   *mocks.MockenvironmentManifestWriter
+	appVersionGetter *mocks.MockversionGetter
 }
 
 func TestInitEnvOpts_Execute(t *testing.T) {
+	const (
+		mockAppVersion       = "v0.0.0"
+		mockCurrVersion      = "v1.29.0"
+		mockFutureAppVersion = "v2.0.0"
+	)
+	mockError := errors.New("some error")
 	testCases := map[string]struct {
 		enableContainerInsights bool
+		allowDowngrade          bool
 		setupMocks              func(m *initEnvExecuteMocks)
 		wantedErrorS            string
 	}{
+		"returns error when failed to get app version": {
+			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return("", mockError)
+			},
+			wantedErrorS: "get template version of application phonetool: some error",
+		},
+		"returns error when cannot downgrade app version": {
+			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockFutureAppVersion, nil)
+			},
+			wantedErrorS: "cannot downgrade application \"phonetool\" (currently in version v2.0.0) to version v1.29.0",
+		},
 		"returns app exists error": {
 			setupMocks: func(m *initEnvExecuteMocks) {
-				m.store.EXPECT().GetApplication("phonetool").Return(nil, errors.New("some error"))
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
+				m.store.EXPECT().GetApplication("phonetool").Return(nil, mockError)
 			},
 			wantedErrorS: "some error",
 		},
 		"returns identity get error": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool"}, nil)
 				m.identity.EXPECT().Get().Return(identity.Caller{}, errors.New("some identity error"))
 			},
@@ -977,15 +1055,17 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 		},
 		"fail to write manifest": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().CreateEnvironment(gomock.Any()).Times(0)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool"}, nil)
 				m.identity.EXPECT().Get().Return(identity.Caller{RootUserARN: "some arn", Account: "1234"}, nil)
-				m.manifestWriter.EXPECT().WriteEnvironmentManifest(gomock.Any(), "test").Return("", errors.New("some error"))
+				m.manifestWriter.EXPECT().WriteEnvironmentManifest(gomock.Any(), "test").Return("", mockError)
 			},
 			wantedErrorS: "write environment manifest: some error",
 		},
 		"failed to create stack set instance": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().CreateEnvironment(gomock.Any()).Times(0)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool"}, nil)
 				m.identity.EXPECT().Get().Return(identity.Caller{RootUserARN: "some arn", Account: "1234"}, nil)
@@ -1002,18 +1082,20 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 		},
 		"errors cannot get app resources by region": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool"}, nil)
 				m.identity.EXPECT().Get().Return(identity.Caller{RootUserARN: "some arn", Account: "1234"}, nil)
 				m.manifestWriter.EXPECT().WriteEnvironmentManifest(gomock.Any(), "test").Return("/environments/test/manifest.yml", nil)
 				m.iam.EXPECT().CreateECSServiceLinkedRole().Return(nil)
 				m.deployer.EXPECT().AddEnvToApp(gomock.Any()).Return(nil)
 				m.appCFN.EXPECT().GetAppResourcesByRegion(&config.Application{Name: "phonetool"}, "us-west-2").
-					Return(nil, errors.New("some error"))
+					Return(nil, mockError)
 			},
 			wantedErrorS: "get app resources: some error",
 		},
 		"deletes retained IAM roles if environment stack fails creation": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool"}, nil)
 				m.manifestWriter.EXPECT().WriteEnvironmentManifest(gomock.Any(), "test").Return("/environments/test/manifest.yml", nil)
 				m.identity.EXPECT().Get().Return(identity.Caller{RootUserARN: "some arn", Account: "1234"}, nil).Times(2)
@@ -1043,6 +1125,7 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 		},
 		"returns error from CreateEnvironment": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{
 					Name: "phonetool",
 				}, nil)
@@ -1070,6 +1153,7 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 		},
 		"success": {
 			enableContainerInsights: true,
+			allowDowngrade:          true,
 			setupMocks: func(m *initEnvExecuteMocks) {
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool"}, nil)
 				m.store.EXPECT().CreateEnvironment(&config.Environment{
@@ -1100,6 +1184,7 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 		},
 		"proceed if manifest already exists": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool"}, nil)
 				m.store.EXPECT().CreateEnvironment(&config.Environment{
 					App:       "phonetool",
@@ -1131,6 +1216,7 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 		},
 		"skips creating stack if environment stack already exists": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool"}, nil)
 				m.store.EXPECT().CreateEnvironment(&config.Environment{
 					App:       "phonetool",
@@ -1173,18 +1259,20 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 		},
 		"failed to delegate DNS (app has Domain and env and apps are different)": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool", AccountID: "1234", Domain: "amazon.com"}, nil)
 				m.identity.EXPECT().Get().Return(identity.Caller{RootUserARN: "some arn", Account: "4567"}, nil).Times(1)
 				m.manifestWriter.EXPECT().WriteEnvironmentManifest(gomock.Any(), "test").Return("/environments/test/manifest.yml", nil)
 				m.progress.EXPECT().Start(fmt.Sprintf(fmtDNSDelegationStart, "4567"))
 				m.progress.EXPECT().Stop(log.Serrorf(fmtDNSDelegationFailed, "4567"))
-				m.deployer.EXPECT().DelegateDNSPermissions(gomock.Any(), "4567").Return(errors.New("some error"))
+				m.deployer.EXPECT().DelegateDNSPermissions(gomock.Any(), "4567").Return(mockError)
 
 			},
 			wantedErrorS: "granting DNS permissions: some error",
 		},
 		"success with DNS Delegation (app has Domain and env and app are different)": {
 			setupMocks: func(m *initEnvExecuteMocks) {
+				m.appVersionGetter.EXPECT().Version().Return(mockAppVersion, nil)
 				m.store.EXPECT().GetApplication("phonetool").Return(&config.Application{Name: "phonetool", AccountID: "1234", Domain: "amazon.com"}, nil)
 				m.store.EXPECT().CreateEnvironment(&config.Environment{
 					App:       "phonetool",
@@ -1228,14 +1316,15 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 			defer ctrl.Finish()
 
 			m := &initEnvExecuteMocks{
-				store:          mocks.NewMockstore(ctrl),
-				deployer:       mocks.NewMockdeployer(ctrl),
-				identity:       mocks.NewMockidentityService(ctrl),
-				progress:       mocks.NewMockprogress(ctrl),
-				iam:            mocks.NewMockroleManager(ctrl),
-				cfn:            mocks.NewMockstackExistChecker(ctrl),
-				appCFN:         mocks.NewMockappResourcesGetter(ctrl),
-				manifestWriter: mocks.NewMockenvironmentManifestWriter(ctrl),
+				store:            mocks.NewMockstore(ctrl),
+				deployer:         mocks.NewMockdeployer(ctrl),
+				identity:         mocks.NewMockidentityService(ctrl),
+				progress:         mocks.NewMockprogress(ctrl),
+				iam:              mocks.NewMockroleManager(ctrl),
+				cfn:              mocks.NewMockstackExistChecker(ctrl),
+				appCFN:           mocks.NewMockappResourcesGetter(ctrl),
+				manifestWriter:   mocks.NewMockenvironmentManifestWriter(ctrl),
+				appVersionGetter: mocks.NewMockversionGetter(ctrl),
 			}
 			tc.setupMocks(m)
 			provider := sessions.ImmutableProvider()
@@ -1248,18 +1337,23 @@ func TestInitEnvOpts_Execute(t *testing.T) {
 					telemetry: telemetryVars{
 						EnableContainerInsights: tc.enableContainerInsights,
 					},
+					allowAppDowngrade: tc.allowDowngrade,
 				},
-				store:          m.store,
-				envDeployer:    m.deployer,
-				appDeployer:    m.deployer,
-				identity:       m.identity,
-				envIdentity:    m.identity,
-				iam:            m.iam,
-				cfn:            m.cfn,
-				prog:           m.progress,
-				sess:           sess,
-				appCFN:         m.appCFN,
-				manifestWriter: m.manifestWriter,
+				store:       m.store,
+				envDeployer: m.deployer,
+				appDeployer: m.deployer,
+				identity:    m.identity,
+				envIdentity: m.identity,
+				iam:         m.iam,
+				cfn:         m.cfn,
+				prog:        m.progress,
+				sess:        sess,
+				appCFN:      m.appCFN,
+				newAppVersionGetter: func(appName string) (versionGetter, error) {
+					return m.appVersionGetter, nil
+				},
+				manifestWriter:  m.manifestWriter,
+				templateVersion: mockCurrVersion,
 			}
 
 			// WHEN

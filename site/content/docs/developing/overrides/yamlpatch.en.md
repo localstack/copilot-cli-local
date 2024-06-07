@@ -4,7 +4,7 @@
 
 ## When should I use YAML Patch over CDK overrides?
 
-Both options are a "break the glass" mechanism to access and configure functionality that is not surfaced by Copilot [manifests](../../manifest/overview.en.md).
+Both options are a "break the glass" mechanism to access and configure functionality that is not surfaced by Copilot [manifests](../../manifest/overview.md).
 
 We recommend using YAML patch over the [AWS Cloud Development Kit (CDK) overrides](./cdk.md) if 1) you do not want to have a dependency
 on any other tooling and framework (such as [Node.js](https://nodejs.org) and the [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html)),
@@ -14,7 +14,7 @@ or 2) you have to write only a handful modifications.
 
 You can extend your CloudFormation template with YAML patches by running the `copilot [noun] override` command.
 For example, you can run `copilot svc override` to update the template of a Load Balanced Web Service.
-The command will generate a sample `cfn.patches.yml` file under the `copilot/[name]/override` directory.
+The command will generate a sample `cfn.patches.yml` file under the `copilot/[name]/overrides` directory.
 
 ## How does it work?
 

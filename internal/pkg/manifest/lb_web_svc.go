@@ -4,10 +4,12 @@
 package manifest
 
 import (
-	"github.com/aws/copilot-cli/internal/pkg/term/color"
-	"github.com/aws/copilot-cli/internal/pkg/term/log"
+	"maps"
 	"strconv"
 	"time"
+
+	"github.com/aws/copilot-cli/internal/pkg/term/color"
+	"github.com/aws/copilot-cli/internal/pkg/term/log"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/imdario/mergo"
@@ -180,6 +182,11 @@ func (s *LoadBalancedWebService) requiredEnvironmentFeatures() []string {
 	return features
 }
 
+// Dockerfile returns the relative path of the Dockerfile in the manifest.
+func (s *LoadBalancedWebService) Dockerfile() string {
+	return s.ImageConfig.Image.dockerfilePath()
+}
+
 // Port returns the exposed port in the manifest.
 // A LoadBalancedWebService always has a port exposed therefore the boolean is always true.
 func (s *LoadBalancedWebService) Port() (port uint16, ok bool) {
@@ -210,6 +217,12 @@ func (s *LoadBalancedWebService) BuildArgs(contextDir string) (map[string]*Docke
 // and the values are either env file paths or empty strings.
 func (s *LoadBalancedWebService) EnvFiles() map[string]string {
 	return envFiles(s.Name, s.TaskConfig, s.Logging, s.Sidecars)
+}
+
+// ContainerDependencies returns a map of ContainerDependency objects for the LoadBalancedWebService
+// including dependencies for its main container, any logging sidecar, and additional sidecars.
+func (s *LoadBalancedWebService) ContainerDependencies() map[string]ContainerDependency {
+	return containerDependencies(aws.StringValue(s.Name), s.ImageConfig.Image, s.Logging, s.Sidecars)
 }
 
 func (s *LoadBalancedWebService) subnets() *SubnetListOrArgs {
@@ -269,34 +282,61 @@ func (c *NetworkLoadBalancerListener) IsEmpty() bool {
 		c.SSLPolicy == nil && c.Stickiness == nil && c.DeregistrationDelay == nil
 }
 
+// HealthCheckPort returns the port a HealthCheck is set to for a NetworkLoadBalancerListener.
+func (listener NetworkLoadBalancerListener) HealthCheckPort(mainContainerPort *uint16) (uint16, error) {
+	// healthCheckPort is defined by Listener.HealthCheck.Port, with fallback on Listener.TargetPort, then Listener.Port.
+	if listener.HealthCheck.Port != nil {
+		return uint16(aws.IntValue(listener.HealthCheck.Port)), nil
+	}
+	if listener.TargetPort != nil {
+		return uint16(aws.IntValue(listener.TargetPort)), nil
+	}
+	if listener.Port != nil {
+		port, _, err := ParsePortMapping(listener.Port)
+		if err != nil {
+			return 0, err
+		}
+		parsedPort, err := strconv.ParseUint(aws.StringValue(port), 10, 16)
+		if err != nil {
+			return 0, err
+		}
+		return uint16(parsedPort), nil
+	}
+	if mainContainerPort != nil {
+		return aws.Uint16Value(mainContainerPort), nil
+	}
+	return 0, nil
+}
+
 // ExposedPorts returns all the ports that are container ports available to receive traffic.
 func (lbws *LoadBalancedWebService) ExposedPorts() (ExposedPortsIndex, error) {
-	var exposedPorts []ExposedPort
+	exposedPorts := make(map[uint16]ExposedPort)
 	workloadName := aws.StringValue(lbws.Name)
-	// port from image.port.
-	exposedPorts = append(exposedPorts, lbws.ImageConfig.exposedPorts(workloadName)...)
 	// port from sidecar[x].image.port.
 	for name, sidecar := range lbws.Sidecars {
-		out, err := sidecar.exposedPorts(name)
+		newExposedPorts, err := sidecar.exposePorts(exposedPorts, name)
 		if err != nil {
 			return ExposedPortsIndex{}, err
 		}
-		exposedPorts = append(exposedPorts, out...)
+		maps.Copy(exposedPorts, newExposedPorts)
 	}
 	// port from http.target_port and http.additional_rules[x].target_port
 	for _, rule := range lbws.HTTPOrBool.RoutingRules() {
-		exposedPorts = append(exposedPorts, rule.exposedPorts(exposedPorts, workloadName)...)
+		maps.Copy(exposedPorts, rule.exposePorts(exposedPorts, workloadName))
 	}
 
 	// port from nlb.target_port and nlb.additional_listeners[x].target_port
 	for _, listener := range lbws.NLBConfig.NLBListeners() {
-		out, err := listener.exposedPorts(exposedPorts, workloadName)
+		newExposedPorts, err := listener.exposePorts(exposedPorts, workloadName)
 		if err != nil {
 			return ExposedPortsIndex{}, err
 		}
-		exposedPorts = append(exposedPorts, out...)
+		maps.Copy(exposedPorts, newExposedPorts)
 	}
-	portsForContainer, containerForPort := prepareParsedExposedPortsMap(sortExposedPorts(exposedPorts))
+	// port from image.port
+	maps.Copy(exposedPorts, lbws.ImageConfig.exposePorts(exposedPorts, workloadName))
+
+	portsForContainer, containerForPort := prepareParsedExposedPortsMap(exposedPorts)
 	return ExposedPortsIndex{
 		WorkloadName:      workloadName,
 		PortsForContainer: portsForContainer,

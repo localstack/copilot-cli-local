@@ -66,6 +66,7 @@ func TestTemplate_ParseSvc(t *testing.T) {
 				_ = afero.WriteFile(fs, "templates/workloads/partials/cf/vpc-connector.yml", []byte("vpc-connector"), 0644)
 				_ = afero.WriteFile(fs, "templates/workloads/partials/cf/alb.yml", []byte("alb"), 0644)
 				_ = afero.WriteFile(fs, "templates/workloads/partials/cf/rollback-alarms.yml", []byte("rollback-alarms"), 0644)
+				_ = afero.WriteFile(fs, "templates/workloads/partials/cf/imported-alb-resources.yml", []byte("imported-alb-resources"), 0644)
 
 				return fs
 			},
@@ -102,6 +103,7 @@ func TestTemplate_ParseSvc(t *testing.T) {
   vpc-connector
   alb
   rollback-alarms
+  imported-alb-resources
 `,
 		},
 	}
@@ -367,6 +369,16 @@ func TestEnvControllerParameters(t *testing.T) {
 			},
 			expected: []string{"ALBWorkloads,", "Aliases,"},
 		},
+		"LBWS with imported ALB": {
+			opts: WorkloadOpts{
+				WorkloadType: "Load Balanced Web Service",
+				ALBEnabled:   true,
+				ImportedALB: &ImportedALB{
+					Name: "MyExistingALB",
+				},
+			},
+			expected: []string{},
+		},
 		"LBWS with ALB and private placement": {
 			opts: WorkloadOpts{
 				WorkloadType: "Load Balanced Web Service",
@@ -500,6 +512,34 @@ func TestApplicationLoadBalancer_Aliases(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.expected, tc.opts.Aliases())
+		})
+	}
+}
+
+func Test_truncateWithHashPadding(t *testing.T) {
+	tests := map[string]struct {
+		inString  string
+		inMax     int
+		inPadding int
+		expected  string
+	}{
+		"less than max": {
+			inString:  "mockString",
+			inMax:     64,
+			inPadding: 0,
+			expected:  "mockString",
+		},
+		"truncate with hash padding": {
+			inString:  "longapp-longenv-longsvc",
+			inMax:     10,
+			inPadding: 6,
+			expected:  "longapp-lo7693be",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.expected, truncateWithHashPadding(tc.inString, tc.inMax, tc.inPadding))
 		})
 	}
 }

@@ -9,17 +9,22 @@ $ copilot svc deploy
 
 Service デプロイの手順は以下の通りです。
 
-1. ローカルの Dockerfile をビルドしてコンテナイメージを作成
-2. `--tag` の値、または最新の git sha (git ディレクトリで作業している場合) を利用してタグ付け
-3. コンテナイメージを ECR にプッシュ
-4. Manifest ファイルと Addon を CloudFormation にパッケージ
-5. ECS タスク定義とサービスを作成 / 更新
+1. `image.build` が Manifest に存在する場合
+    1. ローカルの Dockerfile をビルドしてコンテナイメージを作成
+    2. `--tag` の値、または最新の git sha (git ディレクトリで作業している場合) を利用してタグ付け
+    3. コンテナイメージを ECR にプッシュ
+2. Manifest ファイルと Addon をまとめて CloudFormation テンプレートにパッケージ
+3. ECS タスク定義とサービスを作成 / 更新
 
 ## フラグ
 
 ```
+      --allow-downgrade                Optional. Allow using an older version of Copilot to update Copilot components
+                                       updated by a newer version of Copilot.
   -a, --app string                     Name of the application.
+      --detach                         Optional. Skip displaying CloudFormation deployment progress.
       --diff                           Compares the generated CloudFormation template to the deployed stack.
+      --diff-yes                       Skip interactive approval of diff before deploying.
   -e, --env string                     Name of the environment.
       --force                          Optional. Force a new service deployment using the existing image.
   -h, --help                           help for deploy
@@ -30,7 +35,7 @@ Service デプロイの手順は以下の通りです。
                                        production environment.
       --resource-tags stringToString   Optional. Labels with a key and value separated by commas.
                                        Allows you to categorize resources. (default [])
-      --tag string                     Optional. The container image tag.
+      --tag string                     Optional. The tag for the container images Copilot builds from Dockerfiles.
 ```
 
 !!!info

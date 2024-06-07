@@ -18,6 +18,13 @@ const (
 	envBootstrapCFTemplatePath = "environment/bootstrap-cf.yml"
 )
 
+// The minimum required environment template version for various features.
+const (
+	SecretInitMinEnvVersion    = "v1.4.0"
+	JobRunMinEnvVersion        = "v1.12.0"
+	RunLocalProxyMinEnvVersion = "v1.32.0"
+)
+
 // Available env-controller managed feature names.
 const (
 	ALBFeatureName                     = "ALBWorkloads"
@@ -104,9 +111,9 @@ type Addons struct {
 
 // EnvOpts holds data that can be provided to enable features in an environment stack template.
 type EnvOpts struct {
-	AppName string // The application name. Needed to create default value for svc discovery endpoint for upgraded environments.
-	EnvName string
-	Version string // The template version to use for the environment. If empty uses the "legacy" template.
+	AppName       string // The application name. Needed to create default value for svc discovery endpoint for upgraded environments.
+	EnvName       string
+	LatestVersion string
 
 	// Custom Resources backed by Lambda functions.
 	CustomResources           map[string]S3ObjectLocation
@@ -127,7 +134,6 @@ type EnvOpts struct {
 	Telemetry         *Telemetry
 	CDNConfig         *CDNConfig
 
-	LatestVersion      string
 	SerializedManifest string // Serialized manifest used to render the environment template.
 	ForceUpdateID      string
 

@@ -9,13 +9,17 @@ import (
 	"net"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/arn"
+	"github.com/aws/copilot-cli/internal/pkg/aws/cloudfront"
 	"github.com/aws/copilot-cli/internal/pkg/graph"
 	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
+	"github.com/aws/copilot-cli/internal/pkg/term/color"
 	"github.com/dustin/go-humanize/english"
 )
 
@@ -39,10 +43,23 @@ const (
 
 	// TLS is the tls protocol for NLB.
 	TLS = "TLS"
-	udp = "UDP"
+
+	// UDP is the udp protocol for NLB.
+	UDP = "UDP"
 
 	// Tracing vendors.
 	awsXRAY = "awsxray"
+)
+
+const (
+	defaultProtocol = TCP
+)
+
+const (
+	// Listener rules have a quota of five condition values per rule.
+	// Please refer to https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-limits.html.
+	maxConditionsPerRule = 5
+	rootPath             = "/"
 )
 
 var (
@@ -55,8 +72,9 @@ var (
 
 	essentialContainerDependsOnValidStatuses = []string{dependsOnStart, dependsOnHealthy}
 	dependsOnValidStatuses                   = []string{dependsOnStart, dependsOnComplete, dependsOnSuccess, dependsOnHealthy}
-	nlbValidProtocols                        = []string{TCP, TLS}
-	validContainerProtocols                  = []string{TCP, udp}
+	nlbValidProtocols                        = []string{TCP, UDP, TLS}
+	validContainerProtocols                  = []string{TCP, UDP}
+	validHealthCheckProtocols                = []string{TCP}
 	tracingValidVendors                      = []string{awsXRAY}
 	ecsRollingUpdateStrategies               = []string{ECSDefaultRollingUpdateStrategy, ECSRecreateRollingUpdateStrategy}
 
@@ -134,6 +152,18 @@ func (l LoadBalancedWebService) validate() error {
 	}); err != nil {
 		return fmt.Errorf("validate unique exposed ports: %w", err)
 	}
+	ports, err := l.ExposedPorts()
+	if err != nil {
+		return err
+	}
+	if err = validateHealthCheckPorts(validateHealthCheckPortsOpts{
+		exposedPorts:      ports,
+		mainContainerPort: l.ImageConfig.Port,
+		alb:               l.HTTPOrBool.HTTP,
+		nlb:               l.NLBConfig,
+	}); err != nil {
+		return fmt.Errorf("validate load balancer health check ports: %w", err)
+	}
 	return nil
 }
 
@@ -205,6 +235,11 @@ func (l LoadBalancedWebServiceConfig) validate() error {
 	if err = l.ImageOverride.validate(); err != nil {
 		return err
 	}
+	if l.HTTPOrBool.isEmpty() {
+		return &errFieldMustBeSpecified{
+			missingField: "http",
+		}
+	}
 	if err = l.HTTPOrBool.validate(); err != nil {
 		return fmt.Errorf(`validate "http": %w`, err)
 	}
@@ -236,6 +271,9 @@ func (l LoadBalancedWebServiceConfig) validate() error {
 			readOnlyFS: l.Storage.ReadonlyRootFS,
 		}); err != nil {
 			return fmt.Errorf("validate Windows: %w", err)
+		}
+		if l.Network.Connect.Enabled() {
+			return fmt.Errorf("validate Windows: service connect (`network.connect`) is not supported for Windows")
 		}
 	}
 	if l.TaskConfig.IsARM() {
@@ -301,6 +339,17 @@ func (b BackendService) validate() error {
 	}); err != nil {
 		return fmt.Errorf("validate unique exposed ports: %w", err)
 	}
+	exposedPortsIndex, err := b.ExposedPorts()
+	if err != nil {
+		return err
+	}
+	if err = validateHealthCheckPorts(validateHealthCheckPortsOpts{
+		exposedPorts:      exposedPortsIndex,
+		mainContainerPort: b.ImageConfig.Port,
+		alb:               b.HTTP,
+	}); err != nil {
+		return fmt.Errorf("validate load balancer health check ports: %w", err)
+	}
 	return nil
 }
 
@@ -355,6 +404,9 @@ func (b BackendServiceConfig) validate() error {
 			readOnlyFS: b.Storage.ReadonlyRootFS,
 		}); err != nil {
 			return fmt.Errorf("validate Windows: %w", err)
+		}
+		if b.Network.Connect.Enabled() {
+			return fmt.Errorf("validate Windows: service connect (`network.connect`) is not supported for Windows")
 		}
 	}
 	if b.TaskConfig.IsARM() {
@@ -579,6 +631,9 @@ func (s StaticSite) validate() error {
 }
 
 func (s StaticSiteConfig) validate() error {
+	if err := s.HTTP.validate(); err != nil {
+		return fmt.Errorf(`validate "http": %w`, err)
+	}
 	for idx, fileupload := range s.FileUploads {
 		if err := fileupload.validate(); err != nil {
 			return fmt.Errorf(`validate "files[%d]": %w`, idx, err)
@@ -588,6 +643,35 @@ func (s StaticSiteConfig) validate() error {
 }
 
 func (f FileUpload) validate() error {
+	return f.validateSource()
+}
+
+func (s StaticSiteHTTP) validate() error {
+	if s.Certificate != "" {
+		if s.Alias == "" {
+			return &errFieldMustBeSpecified{
+				missingField:      "alias",
+				conditionalFields: []string{"certificate"},
+			}
+		}
+		certARN, err := arn.Parse(s.Certificate)
+		if err != nil {
+			return fmt.Errorf(`parse cdn certificate: %w`, err)
+		}
+		if certARN.Region != cloudfront.CertRegion {
+			return &errInvalidCloudFrontRegion{}
+		}
+	}
+	return nil
+}
+
+// validateSource returns nil if Source is configured correctly.
+func (f FileUpload) validateSource() error {
+	if f.Source == "" {
+		return &errFieldMustBeSpecified{
+			missingField: "source",
+		}
+	}
 	return nil
 }
 
@@ -597,9 +681,44 @@ func (p Pipeline) Validate() error {
 		return fmt.Errorf(`pipeline name '%s' must be shorter than 100 characters`, p.Name)
 	}
 	for _, stg := range p.Stages {
+		if err := stg.validate(); err != nil {
+			return fmt.Errorf(`validate stage %q for pipeline %q: %w`, stg.Name, p.Name, err)
+		}
 		if err := stg.Deployments.validate(); err != nil {
 			return fmt.Errorf(`validate "deployments" for pipeline stage %s: %w`, stg.Name, err)
 		}
+	}
+	return nil
+}
+
+// validate returns nil if stages are configured correctly.
+func (s PipelineStage) validate() error {
+	if len(s.TestCommands) != 0 && s.PostDeployments != nil {
+		return &errFieldMutualExclusive{
+			firstField:  "post_deployments",
+			secondField: "test_commands",
+			mustExist:   false,
+		}
+	}
+	if s.PreDeployments != nil {
+		for _, preDep := range s.PreDeployments {
+			if preDep.BuildspecPath == "" {
+				return &errFieldMustBeSpecified{
+					missingField: "buildspec",
+				}
+			}
+		}
+
+	}
+	if s.PostDeployments != nil {
+		for _, postDep := range s.PostDeployments {
+			if postDep.BuildspecPath == "" {
+				return &errFieldMustBeSpecified{
+					missingField: "buildspec",
+				}
+			}
+		}
+
 	}
 	return nil
 }
@@ -692,13 +811,6 @@ func (i Image) validate() error {
 	var err error
 	if err := i.ImageLocationOrBuild.validate(); err != nil {
 		return err
-	}
-	if i.Build.isEmpty() == (i.Location == nil) {
-		return &errFieldMutualExclusive{
-			firstField:  "build",
-			secondField: "location",
-			mustExist:   true,
-		}
 	}
 	if err = i.DependsOn.validate(); err != nil {
 		return fmt.Errorf(`validate "depends_on": %w`, err)
@@ -875,7 +987,7 @@ func (r RoutingRule) validate() error {
 		}
 	}
 	if r.ProtocolVersion != nil {
-		if !contains(strings.ToUpper(*r.ProtocolVersion), httpProtocolVersions) {
+		if !slices.Contains(httpProtocolVersions, strings.ToUpper(*r.ProtocolVersion)) {
 			return fmt.Errorf(`"version" field value '%s' must be one of %s`, *r.ProtocolVersion, english.WordSeries(httpProtocolVersions, "or"))
 		}
 	}
@@ -884,6 +996,9 @@ func (r RoutingRule) validate() error {
 			missingField:      "alias",
 			conditionalFields: []string{"hosted_zone"},
 		}
+	}
+	if err := r.validateConditionValuesPerRule(); err != nil {
+		return fmt.Errorf("validate condition values per listener rule: %w", err)
 	}
 	return nil
 }
@@ -1438,6 +1553,9 @@ func (l Logging) validate() error {
 
 // validate returns nil if SidecarConfig is configured correctly.
 func (s SidecarConfig) validate() error {
+	if err := s.validateImage(); err != nil {
+		return err
+	}
 	for ind, mp := range s.MountPoints {
 		if err := mp.validate(); err != nil {
 			return fmt.Errorf(`validate "mount_points[%d]": %w`, ind, err)
@@ -1466,9 +1584,6 @@ func (s SidecarConfig) validate() error {
 	if err := s.DependsOn.validate(); err != nil {
 		return fmt.Errorf(`validate "depends_on": %w`, err)
 	}
-	if err := s.Image.Advanced.validate(); err != nil {
-		return fmt.Errorf(`validate "build": %w`, err)
-	}
 	if s.EnvFile != nil {
 		envFile := aws.StringValue(s.EnvFile)
 		if filepath.Ext(envFile) != envFileExt {
@@ -1476,6 +1591,15 @@ func (s SidecarConfig) validate() error {
 		}
 	}
 	return s.ImageOverride.validate()
+}
+func (s SidecarConfig) validateImage() error {
+	if s.Image.IsZero() {
+		return fmt.Errorf(`must specify one of "image", "image.build, or "image.location"`)
+	}
+	if err := s.Image.validate(); err != nil {
+		return fmt.Errorf(`validate "image": %w`, err)
+	}
+	return nil
 }
 
 // validate returns nil if SidecarMountPoint is configured correctly.
@@ -1810,14 +1934,14 @@ func (q FIFOAdvanceConfig) validateHighThroughputFIFO() error {
 }
 
 func (q FIFOAdvanceConfig) validateDeduplicationScope() error {
-	if q.DeduplicationScope != nil && !contains(aws.StringValue(q.DeduplicationScope), validSQSDeduplicationScopeValues) {
+	if q.DeduplicationScope != nil && !slices.Contains(validSQSDeduplicationScopeValues, aws.StringValue(q.DeduplicationScope)) {
 		return fmt.Errorf(`validate "deduplication_scope": deduplication scope value must be one of %s`, english.WordSeries(validSQSDeduplicationScopeValues, "or"))
 	}
 	return nil
 }
 
 func (q FIFOAdvanceConfig) validateFIFOThroughputLimit() error {
-	if q.FIFOThroughputLimit != nil && !contains(aws.StringValue(q.FIFOThroughputLimit), validSQSFIFOThroughputLimitValues) {
+	if q.FIFOThroughputLimit != nil && !slices.Contains(validSQSFIFOThroughputLimitValues, aws.StringValue(q.FIFOThroughputLimit)) {
 		return fmt.Errorf(`validate "throughput_limit": fifo throughput limit value must be one of %s`, english.WordSeries(validSQSFIFOThroughputLimitValues, "or"))
 	}
 	return nil
@@ -1850,8 +1974,8 @@ func (v Variable) validate() error {
 	return nil
 }
 
-// validate returns nil if stringorFromCFN is configured correctly.
-func (s stringOrFromCFN) validate() error {
+// validate returns nil if StringOrFromCFN is configured correctly.
+func (s StringOrFromCFN) validate() error {
 	if s.isEmpty() {
 		return nil
 	}
@@ -1874,6 +1998,13 @@ func (s Secret) validate() error {
 	return nil
 }
 
+type validateHealthCheckPortsOpts struct {
+	exposedPorts      ExposedPortsIndex
+	mainContainerPort *uint16
+	alb               HTTP
+	nlb               NetworkLoadBalancerConfiguration
+}
+
 type validateExposedPortsOpts struct {
 	mainContainerName string
 	mainContainerPort *uint16
@@ -1887,11 +2018,6 @@ type validateDependenciesOpts struct {
 	sidecarConfig     map[string]*SidecarConfig
 	imageConfig       Image
 	logging           Logging
-}
-
-type containerDependency struct {
-	dependsOn   DependsOn
-	isEssential bool
 }
 
 type validateTargetContainerOpts struct {
@@ -1909,6 +2035,45 @@ type validateWindowsOpts struct {
 type validateARMOpts struct {
 	Spot     *int
 	SpotFrom *int
+}
+
+func validateHealthCheckPorts(opts validateHealthCheckPortsOpts) error {
+	for _, rule := range opts.alb.RoutingRules() {
+		healthCheckPort := rule.HealthCheckPort(opts.mainContainerPort)
+		if err := validateHealthCheckPort(healthCheckPort, opts.exposedPorts); err != nil {
+			return err
+		}
+	}
+
+	for _, listener := range opts.nlb.NLBListeners() {
+		healthCheckPort, err := listener.HealthCheckPort(opts.mainContainerPort)
+		if err != nil {
+			return err
+		}
+		if err := validateHealthCheckPort(healthCheckPort, opts.exposedPorts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateHealthCheckPort(port uint16, ports ExposedPortsIndex) error {
+	container := ports.ContainerForPort[port]
+	containerPorts := ports.PortsForContainer[container]
+	for _, exposedPort := range containerPorts {
+		if exposedPort.Port != port {
+			continue
+		}
+
+		if !slices.Contains(validHealthCheckProtocols, strings.ToUpper(exposedPort.Protocol)) {
+			return &errHealthCheckPortExposedWithInvalidProtocol{
+				healthCheckPort: port,
+				container:       container,
+				protocol:        exposedPort.Protocol,
+			}
+		}
+	}
+	return nil
 }
 
 func validateTargetContainer(opts validateTargetContainerOpts) error {
@@ -1933,30 +2098,17 @@ func validateTargetContainer(opts validateTargetContainerOpts) error {
 }
 
 func validateContainerDeps(opts validateDependenciesOpts) error {
-	containerDependencies := make(map[string]containerDependency)
-	containerDependencies[opts.mainContainerName] = containerDependency{
-		dependsOn:   opts.imageConfig.DependsOn,
-		isEssential: true,
-	}
-	if !opts.logging.IsEmpty() {
-		containerDependencies[FirelensContainerName] = containerDependency{}
-	}
-	for name, config := range opts.sidecarConfig {
-		containerDependencies[name] = containerDependency{
-			dependsOn:   config.DependsOn,
-			isEssential: config.Essential == nil || aws.BoolValue(config.Essential),
-		}
-	}
+	containerDependencies := containerDependencies(opts.mainContainerName, opts.imageConfig, opts.logging, opts.sidecarConfig)
 	if err := validateDepsForEssentialContainers(containerDependencies); err != nil {
 		return err
 	}
 	return validateNoCircularDependencies(containerDependencies)
 }
 
-func validateDepsForEssentialContainers(deps map[string]containerDependency) error {
+func validateDepsForEssentialContainers(deps map[string]ContainerDependency) error {
 	for name, containerDep := range deps {
-		for dep, status := range containerDep.dependsOn {
-			if !deps[dep].isEssential {
+		for dep, status := range containerDep.DependsOn {
+			if !deps[dep].IsEssential {
 				continue
 			}
 			if err := validateEssentialContainerDependency(dep, strings.ToUpper(status)); err != nil {
@@ -1967,131 +2119,183 @@ func validateDepsForEssentialContainers(deps map[string]containerDependency) err
 	return nil
 }
 
+type containerNameAndProtocol struct {
+	containerName     string
+	containerProtocol string
+}
+
 func validateExposedPorts(opts validateExposedPortsOpts) error {
-	containerNameFor := make(map[uint16]string)
-	populateMainContainerPort(containerNameFor, opts)
-	if err := populateSidecarContainerPortsAndValidate(containerNameFor, opts); err != nil {
+	portExposedTo := make(map[uint16]containerNameAndProtocol)
+
+	if err := validateAndPopulateSidecarContainerPorts(portExposedTo, opts); err != nil {
 		return err
 	}
-	if err := populateALBPortsAndValidate(containerNameFor, opts); err != nil {
+	if err := validateAndPopulateALBPorts(portExposedTo, opts); err != nil {
 		return err
 	}
-	if err := populateNLBPortsAndValidate(containerNameFor, opts); err != nil {
+	if err := validateAndPopulateNLBPorts(portExposedTo, opts); err != nil {
+		return err
+	}
+	if err := validateAndPopulateMainContainerPort(portExposedTo, opts); err != nil {
 		return err
 	}
 	return nil
 }
 
-func populateMainContainerPort(containerNameFor map[uint16]string, opts validateExposedPortsOpts) {
+func validateAndPopulateMainContainerPort(portExposedTo map[uint16]containerNameAndProtocol, opts validateExposedPortsOpts) error {
 	if opts.mainContainerPort == nil {
-		return
+		return nil
 	}
-	containerNameFor[aws.Uint16Value(opts.mainContainerPort)] = opts.mainContainerName
+
+	targetPort := aws.Uint16Value(opts.mainContainerPort)
+	targetProtocol := defaultProtocol
+	if existingContainerNameAndProtocol, ok := portExposedTo[targetPort]; ok {
+		targetProtocol = existingContainerNameAndProtocol.containerProtocol
+	}
+
+	return validateAndPopulateExposedPortMapping(portExposedTo, targetPort, targetProtocol, opts.mainContainerName)
 }
 
-func populateSidecarContainerPortsAndValidate(containerNameFor map[uint16]string, opts validateExposedPortsOpts) error {
+func validateAndPopulateSidecarContainerPorts(portExposedTo map[uint16]containerNameAndProtocol, opts validateExposedPortsOpts) error {
 	for name, sidecar := range opts.sidecarConfig {
 		if sidecar.Port == nil {
 			continue
 		}
-		sidecarPort, _, err := ParsePortMapping(sidecar.Port)
+		sidecarPort, sidecarProtocol, err := ParsePortMapping(sidecar.Port)
 		if err != nil {
 			return err
 		}
-		port, err := strconv.ParseUint(aws.StringValue(sidecarPort), 10, 16)
+		parsedPort, err := strconv.ParseUint(aws.StringValue(sidecarPort), 10, 16)
 		if err != nil {
 			return err
 		}
-		if _, ok := containerNameFor[uint16(port)]; ok {
-			return &errContainersExposingSamePort{
-				firstContainer:  name,
-				secondContainer: containerNameFor[uint16(port)],
-				port:            uint16(port),
-			}
+		protocol := defaultProtocol
+		if sidecarProtocol != nil {
+			protocol = aws.StringValue(sidecarProtocol)
 		}
-		containerNameFor[uint16(port)] = name
+
+		if err = validateAndPopulateExposedPortMapping(portExposedTo, uint16(parsedPort), protocol, name); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func populateALBPortsAndValidate(containerNameFor map[uint16]string, opts validateExposedPortsOpts) error {
-	// This condition takes care of the use case where target_container is set to x container and
-	// target_port exposing port 80 which is already exposed by container y.That means container x
-	// is trying to expose the port that is already being exposed by container y, so error out.
+func validateAndPopulateALBPorts(portExposedTo map[uint16]containerNameAndProtocol, opts validateExposedPortsOpts) error {
 	if opts.alb == nil || opts.alb.IsEmpty() {
 		return nil
 	}
+
 	alb := opts.alb
 	for _, rule := range alb.RoutingRules() {
 		if rule.TargetPort == nil {
 			continue
 		}
-		if err := validateContainersNotExposingSamePort(containerNameFor, aws.Uint16Value(rule.TargetPort), rule.TargetContainer); err != nil {
+		targetPort := aws.Uint16Value(rule.TargetPort)
+
+		// Prefer `http.target_container`, then existing exposed port mapping, then fallback on name of main container
+		targetContainer := opts.mainContainerName
+		if existingContainerNameAndProtocol, ok := portExposedTo[targetPort]; ok {
+			targetContainer = existingContainerNameAndProtocol.containerName
+		}
+		if rule.TargetContainer != nil {
+			targetContainer = aws.StringValue(rule.TargetContainer)
+		}
+
+		if err := validateAndPopulateExposedPortMapping(portExposedTo, targetPort, TCP, targetContainer); err != nil {
 			return err
 		}
-		targetContainerName := opts.mainContainerName
-		if rule.TargetContainer != nil {
-			targetContainerName = aws.StringValue(rule.TargetContainer)
-		}
-		containerNameFor[aws.Uint16Value(rule.TargetPort)] = targetContainerName
-	}
-
-	return nil
-}
-
-func validateContainersNotExposingSamePort(containerNameFor map[uint16]string, targetPort uint16, targetContainer *string) error {
-	container, exists := containerNameFor[targetPort]
-	if !exists {
-		return nil
-	}
-	if targetContainer != nil && container != aws.StringValue(targetContainer) {
-		return &errContainersExposingSamePort{
-			firstContainer:  aws.StringValue(targetContainer),
-			secondContainer: container,
-			port:            targetPort,
-		}
 	}
 	return nil
 }
 
-func populateNLBPortsAndValidate(containerNameFor map[uint16]string, opts validateExposedPortsOpts) error {
+func validateAndPopulateNLBPorts(portExposedTo map[uint16]containerNameAndProtocol, opts validateExposedPortsOpts) error {
 	if opts.nlb == nil || opts.nlb.IsEmpty() {
 		return nil
 	}
+
 	nlb := opts.nlb
-	if err := populateAndValidateNLBPorts(nlb.Listener, containerNameFor, opts.mainContainerName); err != nil {
+	if err := validateAndPopulateNLBListenerPorts(nlb.Listener, portExposedTo, opts.mainContainerName); err != nil {
 		return fmt.Errorf(`validate "nlb": %w`, err)
 	}
 
 	for idx, listener := range nlb.AdditionalListeners {
-		if err := populateAndValidateNLBPorts(listener, containerNameFor, opts.mainContainerName); err != nil {
+		if err := validateAndPopulateNLBListenerPorts(listener, portExposedTo, opts.mainContainerName); err != nil {
 			return fmt.Errorf(`validate "nlb.additional_listeners[%d]": %w`, idx, err)
 		}
 	}
 	return nil
 }
 
-func populateAndValidateNLBPorts(listener NetworkLoadBalancerListener, containerNameFor map[uint16]string, mainContainerName string) error {
-	nlbPort, _, err := ParsePortMapping(listener.Port)
+func validateAndPopulateNLBListenerPorts(listener NetworkLoadBalancerListener, portExposedTo map[uint16]containerNameAndProtocol, mainContainerName string) error {
+	nlbReceiverPort, nlbProtocol, err := ParsePortMapping(listener.Port)
 	if err != nil {
 		return err
 	}
-	port, err := strconv.ParseUint(aws.StringValue(nlbPort), 10, 16)
+
+	port, err := strconv.ParseUint(aws.StringValue(nlbReceiverPort), 10, 16)
 	if err != nil {
 		return err
 	}
+
 	targetPort := uint16(port)
 	if listener.TargetPort != nil {
 		targetPort = uint16(aws.IntValue(listener.TargetPort))
 	}
-	if err = validateContainersNotExposingSamePort(containerNameFor, uint16(aws.IntValue(listener.TargetPort)), listener.TargetContainer); err != nil {
-		return err
+
+	// Prefer `nlb.port`, then fallback on default protocol
+	targetProtocol := defaultProtocol
+	if nlbProtocol != nil {
+		targetProtocol = strings.ToUpper(aws.StringValue(nlbProtocol))
 	}
+
+	// Handle TLS termination of container exposed port protocol
+	if targetProtocol == TLS {
+		targetProtocol = TCP
+	}
+
+	// Prefer `nlb.target_container`, then existing exposed port mapping, then fallback on name of main container
 	targetContainer := mainContainerName
+	if existingContainerNameAndProtocol, ok := portExposedTo[targetPort]; ok {
+		targetContainer = existingContainerNameAndProtocol.containerName
+	}
 	if listener.TargetContainer != nil {
 		targetContainer = aws.StringValue(listener.TargetContainer)
 	}
-	containerNameFor[targetPort] = targetContainer
+
+	return validateAndPopulateExposedPortMapping(portExposedTo, targetPort, targetProtocol, targetContainer)
+}
+
+func validateAndPopulateExposedPortMapping(portExposedTo map[uint16]containerNameAndProtocol, targetPort uint16, targetProtocol string, targetContainer string) error {
+	exposedContainerAndProtocol, alreadyExposed := portExposedTo[targetPort]
+	targetProtocol = strings.ToUpper(targetProtocol)
+
+	// Port is not associated with container and protocol, populate map
+	if !alreadyExposed {
+		portExposedTo[targetPort] = containerNameAndProtocol{
+			containerName:     targetContainer,
+			containerProtocol: targetProtocol,
+		}
+		return nil
+	}
+
+	exposedContainer := exposedContainerAndProtocol.containerName
+	exposedProtocol := exposedContainerAndProtocol.containerProtocol
+	if exposedContainer != targetContainer {
+		return &errContainersExposingSamePort{
+			firstContainer:  targetContainer,
+			secondContainer: exposedContainer,
+			port:            targetPort,
+		}
+	}
+	if exposedProtocol != targetProtocol {
+		return &errContainerPortExposedWithMultipleProtocol{
+			container:      exposedContainer,
+			port:           targetPort,
+			firstProtocol:  targetProtocol,
+			secondProtocol: exposedProtocol,
+		}
+	}
 	return nil
 }
 
@@ -2104,7 +2308,7 @@ func validateEssentialContainerDependency(name, status string) error {
 	return fmt.Errorf("essential container %s can only have status %s", name, english.WordSeries([]string{dependsOnStart, dependsOnHealthy}, "or"))
 }
 
-func validateNoCircularDependencies(deps map[string]containerDependency) error {
+func validateNoCircularDependencies(deps map[string]ContainerDependency) error {
 	dependencies, err := buildDependencyGraph(deps)
 	if err != nil {
 		return err
@@ -2121,10 +2325,10 @@ func validateNoCircularDependencies(deps map[string]containerDependency) error {
 	return fmt.Errorf("circular container dependency chain includes the following containers: %s", cycle)
 }
 
-func buildDependencyGraph(deps map[string]containerDependency) (*graph.Graph[string], error) {
+func buildDependencyGraph(deps map[string]ContainerDependency) (*graph.Graph[string], error) {
 	dependencyGraph := graph.New[string]()
 	for name, containerDep := range deps {
-		for dep := range containerDep.dependsOn {
+		for dep := range containerDep.DependsOn {
 			if _, ok := deps[dep]; !ok {
 				return nil, fmt.Errorf("container %s does not exist", dep)
 			}
@@ -2197,21 +2401,12 @@ func validateARM(opts validateARMOpts) error {
 	return nil
 }
 
-func contains(name string, names []string) bool {
-	for _, n := range names {
-		if name == n {
-			return true
-		}
-	}
-	return false
-}
-
 // validate returns nil if ImageLocationOrBuild is configured correctly.
 func (i ImageLocationOrBuild) validate() error {
 	if err := i.Build.validate(); err != nil {
 		return fmt.Errorf(`validate "build": %w`, err)
 	}
-	if !i.Build.isEmpty() && i.Location != nil {
+	if i.Build.isEmpty() == (i.Location == nil) {
 		return &errFieldMutualExclusive{
 			firstField:  "build",
 			secondField: "location",
@@ -2219,4 +2414,125 @@ func (i ImageLocationOrBuild) validate() error {
 		}
 	}
 	return nil
+}
+
+func (r *RoutingRule) validateConditionValuesPerRule() error {
+	aliases, err := r.Alias.ToStringSlice()
+	if err != nil {
+		return fmt.Errorf("convert aliases to string slice: %w", err)
+	}
+	allowedSourceIps := make([]string, len(r.AllowedSourceIps))
+	for idx, ip := range r.AllowedSourceIps {
+		allowedSourceIps[idx] = string(ip)
+	}
+	if len(aliases)+len(allowedSourceIps) >= maxConditionsPerRule {
+		return &errMaxConditionValuesPerRule{
+			path:             aws.StringValue(r.Path),
+			aliases:          aliases,
+			allowedSourceIps: allowedSourceIps,
+		}
+	}
+	return nil
+}
+
+type errMaxConditionValuesPerRule struct {
+	path             string
+	aliases          []string
+	allowedSourceIps []string
+}
+
+func (e *errMaxConditionValuesPerRule) Error() string {
+	return fmt.Sprintf("listener rule has more than five conditions %s %s", english.WordSeries(e.aliases, "and"),
+		english.WordSeries(e.allowedSourceIps, "and"))
+}
+
+func (e *errMaxConditionValuesPerRule) RecommendActions() string {
+	cgList := e.generateConditionGroups()
+	var fmtListenerRules strings.Builder
+	fmtListenerRules.WriteString(fmt.Sprintf(`http:
+  path: %s
+  alias: %s
+  allowed_source_ips: %s
+  additional_rules:`, e.path, fmtStringArray(cgList[0].aliases), fmtStringArray(cgList[0].allowedSourceIps)))
+	for i := 1; i < len(cgList); i++ {
+		fmtListenerRules.WriteString(fmt.Sprintf(`
+    - path: %s
+      alias: %s
+      allowed_source_ips: %s`, e.path, fmtStringArray(cgList[i].aliases), fmtStringArray(cgList[i].allowedSourceIps)))
+	}
+	return fmt.Sprintf(`You can split the "alias" and "allowed_source_ips" field into separate rules, so that each rule contains up to 5 values: 
+%s`, color.HighlightCodeBlock(fmtListenerRules.String()))
+}
+
+func fmtStringArray(arr []string) string {
+	return fmt.Sprintf("[%s]", strings.Join(arr, ","))
+}
+
+// conditionGroup represents groups of conditions per listener rule.
+type conditionGroup struct {
+	allowedSourceIps []string
+	aliases          []string
+}
+
+func (e *errMaxConditionValuesPerRule) generateConditionGroups() []conditionGroup {
+	remaining := calculateRemainingConditions(e.path)
+	if len(e.aliases) != 0 && len(e.allowedSourceIps) != 0 {
+		return e.generateConditionsWithSourceIPsAndAlias(remaining)
+	}
+	if len(e.aliases) != 0 {
+		return e.generateConditionsWithAliasOnly(remaining)
+	}
+	return e.generateConditionWithSourceIPsOnly(remaining)
+}
+
+func calculateRemainingConditions(path string) int {
+	rcPerRule := maxConditionsPerRule
+	if path != rootPath {
+		return rcPerRule - 2
+	}
+	return rcPerRule - 1
+}
+
+func (e *errMaxConditionValuesPerRule) generateConditionsWithSourceIPsAndAlias(remaining int) []conditionGroup {
+	var groups []conditionGroup
+	for i := 0; i < len(e.allowedSourceIps); i++ {
+		var group conditionGroup
+		group.allowedSourceIps = []string{e.allowedSourceIps[i]}
+		groups = append(groups, e.generateConditionsGroups(remaining-1, true, group)...)
+	}
+	return groups
+}
+
+func (e *errMaxConditionValuesPerRule) generateConditionsWithAliasOnly(remaining int) []conditionGroup {
+	var group conditionGroup
+	return e.generateConditionsGroups(remaining, true, group)
+}
+
+func (e *errMaxConditionValuesPerRule) generateConditionWithSourceIPsOnly(remaining int) []conditionGroup {
+	var group conditionGroup
+	return e.generateConditionsGroups(remaining, false, group)
+}
+
+func (e *errMaxConditionValuesPerRule) generateConditionsGroups(remaining int, isAlias bool, group conditionGroup) []conditionGroup {
+	var groups []conditionGroup
+	var conditions []string
+	if isAlias {
+		conditions = e.aliases
+	} else {
+		conditions = e.allowedSourceIps
+	}
+	for i := 0; i < len(conditions); i += remaining {
+		end := i + remaining
+		if end > len(conditions) {
+			end = len(conditions)
+		}
+		if isAlias {
+			group.aliases = conditions[i:end]
+			groups = append(groups, group)
+			continue
+		}
+		group.allowedSourceIps = conditions[i:end]
+		groups = append(groups, group)
+	}
+	return groups
 }

@@ -5,18 +5,24 @@
 package dockerengine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/aws/copilot-cli/internal/pkg/exec"
+	"github.com/fatih/color"
+	"golang.org/x/sync/errgroup"
 )
 
 // Cmd is the interface implemented by external commands.
@@ -40,6 +46,20 @@ const (
 	credStoreECRLogin = "ecr-login" // set on `credStore` attribute in docker configuration file
 )
 
+// Health states of a Container.
+const (
+	noHealthcheck = "none"      // Indicates there is no healthcheck
+	starting      = "starting"  // Starting indicates that the container is not yet ready
+	healthy       = "healthy"   // Healthy indicates that the container is running correctly
+	unhealthy     = "unhealthy" // Unhealthy indicates that the container has a problem
+)
+
+// State of a docker container.
+const (
+	containerStatusRunning = "running"
+	containerStatusExited  = "exited"
+)
+
 // DockerCmdClient represents the docker client to interact with the server via external commands.
 type DockerCmdClient struct {
 	runner Cmd
@@ -60,15 +80,37 @@ func New(cmd Cmd) DockerCmdClient {
 
 // BuildArguments holds the arguments that can be passed while building a container.
 type BuildArguments struct {
-	URI        string            // Required. Location of ECR Repo. Used to generate image name in conjunction with tag.
-	Tags       []string          // Required. List of tags to apply to the image.
-	Dockerfile string            // Required. Dockerfile to pass to `docker build` via --file flag.
-	Context    string            // Optional. Build context directory to pass to `docker build`.
-	Target     string            // Optional. The target build stage to pass to `docker build`.
-	CacheFrom  []string          // Optional. Images to consider as cache sources to pass to `docker build`
-	Platform   string            // Optional. OS/Arch to pass to `docker build`.
-	Args       map[string]string // Optional. Build args to pass via `--build-arg` flags. Equivalent to ARG directives in dockerfile.
-	Labels     map[string]string // Required. Set metadata for an image.
+	URI               string            // Required. Location of ECR Repo. Used to generate image name in conjunction with tag.
+	Tags              []string          // Required. List of tags to apply to the image.
+	Dockerfile        string            // Optional. One of Dockerfile or DockerfileContent is required. Dockerfile to pass to `docker build` via --file flag.
+	DockerfileContent string            // Optional. One of Dockerfile or DockerfileContent is required. Dockerfile content to pass to `docker build` via stdin.
+	Context           string            // Optional. Build context directory to pass to `docker build`.
+	Target            string            // Optional. The target build stage to pass to `docker build`.
+	CacheFrom         []string          // Optional. Images to consider as cache sources to pass to `docker build`
+	Platform          string            // Optional. OS/Arch to pass to `docker build`.
+	Args              map[string]string // Optional. Build args to pass via `--build-arg` flags. Equivalent to ARG directives in dockerfile.
+	Labels            map[string]string // Required. Set metadata for an image.
+}
+
+// RunOptions holds the options for running a Docker container.
+type RunOptions struct {
+	ImageURI             string            // Required. The image name to run.
+	Secrets              map[string]string // Optional. Secrets to pass to the container as environment variables.
+	EnvVars              map[string]string // Optional. Environment variables to pass to the container.
+	ContainerName        string            // Optional. The name for the container.
+	ContainerPorts       map[string]string // Optional. Contains host and container ports.
+	Command              []string          // Optional. The command to run in the container.
+	ContainerNetwork     string            // Optional. Network mode for the container.
+	LogOptions           RunLogOptions     // Optional. Configure logging for output from the container
+	AddLinuxCapabilities []string          // Optional. Adds linux capabilities to the container.
+	Init                 bool              // Optional. Adds an init process as an entrypoint.
+}
+
+// RunLogOptions holds the logging configuration for Run().
+type RunLogOptions struct {
+	Color      *color.Color
+	Output     io.Writer
+	LinePrefix string
 }
 
 // GenerateDockerBuildArgs returns command line arguments to be passed to the Docker build command based on the provided BuildArguments.
@@ -135,7 +177,11 @@ func (in *BuildArguments) GenerateDockerBuildArgs(c DockerCmdClient) ([]string, 
 		args = append(args, "--label", fmt.Sprintf("%s=%s", k, in.Labels[k]))
 	}
 
-	args = append(args, dfDir, "-f", in.Dockerfile)
+	if in.DockerfileContent != "" {
+		args = append(args, "-")
+	} else {
+		args = append(args, dfDir, "-f", in.Dockerfile)
+	}
 	return args, nil
 }
 
@@ -150,7 +196,14 @@ func (c DockerCmdClient) Build(ctx context.Context, in *BuildArguments, w io.Wri
 	if err != nil {
 		return fmt.Errorf("generate docker build args: %w", err)
 	}
-	if err := c.runner.RunWithContext(ctx, "docker", args, exec.Stdout(w), exec.Stderr(w)); err != nil {
+	opts := []exec.CmdOption{
+		exec.Stdout(w),
+		exec.Stderr(w),
+	}
+	if in.DockerfileContent != "" {
+		opts = append(opts, exec.Stdin(strings.NewReader(in.DockerfileContent)))
+	}
+	if err := c.runner.RunWithContext(ctx, "docker", args, opts...); err != nil {
 		return fmt.Errorf("building image: %w", err)
 	}
 	return nil
@@ -167,6 +220,15 @@ func (c DockerCmdClient) Login(uri, username, password string) error {
 	}
 
 	return nil
+}
+
+// Exec runs cmd in container with args and writes stderr/stdout to out.
+func (c DockerCmdClient) Exec(ctx context.Context, container string, out io.Writer, cmd string, args ...string) error {
+	return c.runner.RunWithContext(ctx, "docker", append([]string{
+		"exec",
+		container,
+		cmd,
+	}, args...), exec.Stdout(out), exec.Stderr(out))
 }
 
 // Push pushes the images with the specified tags and ecr repository URI, and returns the image digest on success.
@@ -201,19 +263,229 @@ func (c DockerCmdClient) Push(ctx context.Context, uri string, w io.Writer, tags
 	return parts[1], nil
 }
 
+func (in *RunOptions) generateRunArguments() []string {
+	args := []string{"run"}
+
+	if in.ContainerName != "" {
+		args = append(args, "--name", in.ContainerName)
+	}
+
+	for hostPort, containerPort := range in.ContainerPorts {
+		args = append(args, "--publish", fmt.Sprintf("%s:%s", hostPort, containerPort))
+	}
+
+	if in.ContainerNetwork != "" {
+		args = append(args, "--network", fmt.Sprintf("container:%s", in.ContainerNetwork))
+	}
+
+	for key, value := range in.Secrets {
+		args = append(args, "--env", fmt.Sprintf("%s=%s", key, value))
+	}
+
+	for key, value := range in.EnvVars {
+		args = append(args, "--env", fmt.Sprintf("%s=%s", key, value))
+	}
+
+	for _, cap := range in.AddLinuxCapabilities {
+		args = append(args, "--cap-add", cap)
+	}
+
+	if in.Init {
+		args = append(args, "--init")
+	}
+
+	args = append(args, in.ImageURI)
+
+	if in.Command != nil && len(in.Command) > 0 {
+		args = append(args, in.Command...)
+	}
+	return args
+}
+
+// Run runs a Docker container with the sepcified options.
+func (c DockerCmdClient) Run(ctx context.Context, options *RunOptions) error {
+	type exitCodeError interface {
+		ExitCode() int
+	}
+	// set default options
+	if options.LogOptions.Color == nil {
+		options.LogOptions.Color = color.New()
+	}
+	if options.LogOptions.Output == nil {
+		options.LogOptions.Output = os.Stderr
+	}
+
+	// Ensure only one thread is writing to Output at a time
+	// since we don't know if the Writer is thread safe.
+	mu := &sync.Mutex{}
+	g, ctx := errgroup.WithContext(ctx)
+	logger := func() io.WriteCloser {
+		pr, pw := io.Pipe()
+		g.Go(func() error {
+			scanner := bufio.NewScanner(pr)
+			for scanner.Scan() {
+				mu.Lock()
+				options.LogOptions.Color.Fprintln(options.LogOptions.Output, options.LogOptions.LinePrefix+scanner.Text())
+				mu.Unlock()
+			}
+			return scanner.Err()
+		})
+		return pw
+	}
+
+	g.Go(func() error {
+		// Close loggers to ensure scanner.Scan() in the logger goroutine returns.
+		// This is really only an issue in tests; os/exec.Cmd.Run() returns EOF to
+		// output streams when the command exits.
+		stdout := logger()
+		defer stdout.Close()
+		stderr := logger()
+		defer stderr.Close()
+
+		if err := c.runner.RunWithContext(ctx, "docker",
+			options.generateRunArguments(),
+			exec.Stdout(stdout),
+			exec.Stderr(stderr),
+			exec.NewProcessGroup()); err != nil {
+			var ec exitCodeError
+			if errors.As(err, &ec) {
+				return &ErrContainerExited{
+					name:     options.ContainerName,
+					exitcode: ec.ExitCode(),
+				}
+			}
+			return fmt.Errorf("running container: %w", err)
+		}
+		return nil
+	})
+
+	return g.Wait()
+}
+
+// IsContainerRunning checks if a specific Docker container is running.
+func (c DockerCmdClient) IsContainerRunning(ctx context.Context, name string) (bool, error) {
+	state, err := c.containerState(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	switch state.Status {
+	case containerStatusRunning:
+		return true, nil
+	case containerStatusExited:
+		return false, &ErrContainerExited{name: name, exitcode: state.ExitCode}
+	}
+	return false, nil
+}
+
+// ContainerExitCode returns the exit code of a container.
+func (c DockerCmdClient) ContainerExitCode(ctx context.Context, name string) (int, error) {
+	state, err := c.containerState(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	if state.Status == containerStatusRunning {
+		return 0, &ErrContainerNotExited{name: name}
+	}
+	return state.ExitCode, nil
+}
+
+// IsContainerHealthy returns true if a container health state is healthy.
+func (c DockerCmdClient) IsContainerHealthy(ctx context.Context, containerName string) (bool, error) {
+	state, err := c.containerState(ctx, containerName)
+	if err != nil {
+		return false, err
+	}
+	if state.Status != containerStatusRunning {
+		return false, fmt.Errorf("container %q is not in %q state", containerName, containerStatusRunning)
+	}
+	if state.Health == nil {
+		return false, fmt.Errorf("healthcheck is not configured for container %q", containerName)
+	}
+	switch state.Health.Status {
+	case healthy:
+		return true, nil
+	case starting:
+		return false, nil
+	case unhealthy:
+		return false, fmt.Errorf("container %q is %q", containerName, unhealthy)
+	case noHealthcheck:
+		return false, fmt.Errorf("healthcheck is not configured for container %q", containerName)
+	default:
+		return false, fmt.Errorf("container %q had unexpected health status %q", containerName, state.Health.Status)
+	}
+}
+
+// ContainerState holds the status, exit code, and health information of a Docker container.
+type ContainerState struct {
+	Status   string `json:"Status"`
+	ExitCode int    `json:"ExitCode"`
+	Health   *struct {
+		Status string `json:"Status"`
+	}
+}
+
+// containerState retrieves the current state of a specified Docker container.
+// It returns a ContainerState object and any error encountered during retrieval.
+func (d *DockerCmdClient) containerState(ctx context.Context, containerName string) (ContainerState, error) {
+	containerID, err := d.containerID(ctx, containerName)
+	if err != nil {
+		return ContainerState{}, err
+	}
+	if containerID == "" {
+		return ContainerState{}, nil
+	}
+	buf := &bytes.Buffer{}
+	if err := d.runner.RunWithContext(ctx, "docker", []string{"inspect", "--format", "{{json .State}}", containerID}, exec.Stdout(buf)); err != nil {
+		return ContainerState{}, fmt.Errorf("run docker inspect: %w", err)
+	}
+	// Make sure we unmarshal a valid json string.
+	out := regexp.MustCompile(`{(.|\n)*}`).FindString(buf.String())
+	var containerState ContainerState
+	if err := json.Unmarshal([]byte(out), &containerState); err != nil {
+		return ContainerState{}, fmt.Errorf("unmarshal state of container %q:%w", containerName, err)
+	}
+	return containerState, nil
+}
+
+// containerID gets the ID of a Docker container by its name.
+func (d *DockerCmdClient) containerID(ctx context.Context, containerName string) (string, error) {
+	buf := &bytes.Buffer{}
+	if err := d.runner.RunWithContext(ctx, "docker", []string{"ps", "-a", "-q", "--filter", "name=" + containerName}, exec.Stdout(buf)); err != nil {
+		return "", fmt.Errorf("run docker ps: %w", err)
+	}
+	return strings.TrimSpace(buf.String()), nil
+}
+
+// Stop calls `docker stop` to stop a running container.
+func (c DockerCmdClient) Stop(ctx context.Context, containerID string) error {
+	buf := &bytes.Buffer{}
+	if err := c.runner.RunWithContext(ctx, "docker", []string{"stop", containerID}, exec.Stdout(buf), exec.Stderr(buf)); err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(buf.String()), err)
+	}
+	return nil
+}
+
+// Rm calls `docker rm` to remove a stopped container.
+func (c DockerCmdClient) Rm(ctx context.Context, containerID string) error {
+	buf := &bytes.Buffer{}
+	if err := c.runner.RunWithContext(ctx, "docker", []string{"rm", containerID}, exec.Stdout(buf), exec.Stderr(buf)); err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(buf.String()), err)
+	}
+	return nil
+}
+
 // CheckDockerEngineRunning will run `docker info` command to check if the docker engine is running.
 func (c DockerCmdClient) CheckDockerEngineRunning() error {
 	if _, err := osexec.LookPath("docker"); err != nil {
 		return ErrDockerCommandNotFound
 	}
 	buf := &bytes.Buffer{}
-	err := c.runner.Run("docker", []string{"info", "-f", "'{{json .}}'"}, exec.Stdout(buf))
+	err := c.runner.Run("docker", []string{"info", "-f", "{{json .}}"}, exec.Stdout(buf))
 	if err != nil {
 		return fmt.Errorf("get docker info: %w", err)
 	}
-	// Trim redundant prefix and suffix. For example: '{"ServerErrors":["Cannot connect...}'\n returns
-	// {"ServerErrors":["Cannot connect...}
-	out := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(buf.String()), "'"), "'")
+	// Make sure we unmarshal a valid json string.
+	out := regexp.MustCompile(`{(.|\n)*}`).FindString(buf.String())
 	type dockerEngineNotRunningMsg struct {
 		ServerErrors []string `json:"ServerErrors"`
 	}
@@ -240,7 +512,8 @@ func (c DockerCmdClient) GetPlatform() (os, arch string, err error) {
 		return "", "", fmt.Errorf("run docker version: %w", err)
 	}
 
-	out := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(buf.String()), "'"), "'")
+	// Make sure we unmarshal a valid json string.
+	out := regexp.MustCompile(`{(.|\n)*}`).FindString(buf.String())
 	type dockerServer struct {
 		OS   string `json:"Os"`
 		Arch string `json:"Arch"`
@@ -294,13 +567,13 @@ func PlatformString(os, arch string) string {
 
 func parseCredFromDockerConfig(config []byte) (*dockerConfig, error) {
 	/*
-			Sample docker config file
-		    {
-		        "credsStore" : "ecr-login",
-		        "credHelpers": {
-		            "dummyaccountId.dkr.ecr.region.amazonaws.com": "ecr-login"
-		        }
-		    }
+	   Sample docker config file
+	   {
+	       "credsStore" : "ecr-login",
+	       "credHelpers": {
+	           "dummyaccountId.dkr.ecr.region.amazonaws.com": "ecr-login"
+	       }
+	   }
 	*/
 	cred := dockerConfig{}
 	err := json.Unmarshal(config, &cred)
@@ -318,12 +591,4 @@ func userHomeDirectory() string {
 	}
 
 	return home
-}
-
-type errEmptyImageTags struct {
-	uri string
-}
-
-func (e *errEmptyImageTags) Error() string {
-	return fmt.Sprintf("tags to reference an image should not be empty for building and pushing into the ECR repository %s", e.uri)
 }

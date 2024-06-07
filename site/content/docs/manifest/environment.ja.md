@@ -172,7 +172,7 @@ network:
 <span class="parent-field">network.vpc.security_group.</span><a id="network-vpc-security-group-ingress" href="#network-vpc-security-group-ingress" class="field">`ingress`</a> <span class="type">Array of Security Group Rules</span>    
 Environment のインバウンドセキュリティグループに関するルールのリスト。
 
-<span class="parent-field">network.vpc.security-group.</span><a id="network-vpc-security-group-egress" href="#network-vpc-security-group-egress" class="field">`egress`</a> <span class="type">Array of Security Group Rules</span>    
+<span class="parent-field">network.vpc.security_group.</span><a id="network-vpc-security-group-egress" href="#network-vpc-security-group-egress" class="field">`egress`</a> <span class="type">Array of Security Group Rules</span>    
 Environment のアウトバウンドセキュリティグループに関するルールのリスト。
 
 <span class="parent-field">network.vpc.security_group.<type\>.</span><a id="network-vpc-security-group-ip-protocol" href="#network-vpc-security-group-ip-protocol" class="field">`ip_protocol`</a> <span class="type">String</span>    
@@ -236,11 +236,10 @@ cdn:
 静的アセットに使用する追加の HTTPS ドメインエイリアス。
 
 <span class="parent-field">cdn.static_assets.</span><a id="cdn-static-assets-location" href="#cdn-static-assets-location" class="field">`location`</a> <span class="type">String</span>  
-S3バケットのDNSドメイン名。(例: `EXAMPLE-BUCKET.s3.us-west-2.amazonaws.com`)
+S3 バケットの DNS ドメイン名。(例: `EXAMPLE-BUCKET.s3.us-west-2.amazonaws.com`)
 
 <span class="parent-field">cdn.static_assets.</span><a id="cdn-static-assets-path" href="#cdn-static-assets-path" class="field">`path`</a> <span class="type">String</span>  
-The path pattern (for example, `statics/*`) that specifies which requests should be forwarded to the S3 bucket.
-S3 バケットに転送するリクエストを指定するパスパターン。(例: `statics/*`)
+S3 バケットに転送するリクエストを指定するパスパターン。(例: `static/*`)
 
 <span class="parent-field">cdn.</span><a id="cdn-tls-termination" href="#cdn-tls-termination" class="field">`terminate_tls`</a> <span class="type">Boolean</span>
 CloudFront での TLS ターミネーションを有効化します。
@@ -331,7 +330,7 @@ http:
 <span class="parent-field">http.private.</span><a id="http-private-subnets" href="#http-private-subnets" class="field">`subnets`</a> <span class="type">Array of Strings</span>   
 内部ロードバランサーを配置するサブネット ID。
 
-<span class="parent-field">http.private</span><a id="http-private-ingress" href="#http-private-ingress" class="field">`ingress`</a> <span class="type">Map</span><span class="version">[v1.23.0](../../blogs/release-v123.ja.md#move-misplaced-http-fields-in-environment-manifest-backward-compatible) で変更されました</span>
+<span class="parent-field">http.private.</span><a id="http-private-ingress" href="#http-private-ingress" class="field">`ingress`</a> <span class="type">Map</span><span class="version">[v1.23.0](../../blogs/release-v123.ja.md#move-misplaced-http-fields-in-environment-manifest-backward-compatible) で変更されました</span>
 内部ロードバランサーを許可する Ingress ルール。  
 ```yaml
 http:

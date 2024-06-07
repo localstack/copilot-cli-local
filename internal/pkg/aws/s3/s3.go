@@ -20,6 +20,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/dustin/go-humanize"
+	"github.com/xlab/treeprint"
 )
 
 const (
@@ -31,6 +33,9 @@ const (
 
 	// Object location prefixes.
 	s3URIPrefix = "s3://"
+
+	// Delimiter for ListObjectsV2Input.
+	slashDelimiter = "/"
 )
 
 type s3ManagerAPI interface {
@@ -39,6 +44,7 @@ type s3ManagerAPI interface {
 
 type s3API interface {
 	ListObjectVersions(input *s3.ListObjectVersionsInput) (*s3.ListObjectVersionsOutput, error)
+	ListObjectsV2(input *s3.ListObjectsV2Input) (*s3.ListObjectsV2Output, error)
 	DeleteObjects(input *s3.DeleteObjectsInput) (*s3.DeleteObjectsOutput, error)
 	HeadBucket(input *s3.HeadBucketInput) (*s3.HeadBucketOutput, error)
 }
@@ -78,13 +84,12 @@ func (s *S3) EmptyBucket(bucket string) error {
 	var listResp *s3.ListObjectVersionsOutput
 	var err error
 
-	// Bucket is exists check to make sure the bucket exists before proceeding in emptying it
-	isExists, err := s.isBucketExists(bucket)
+	bucketExists, err := s.bucketExists(bucket)
 	if err != nil {
-		return fmt.Errorf("unable to determine the existance of bucket %s: %w", bucket, err)
+		return fmt.Errorf("unable to determine the existence of bucket %s: %w", bucket, err)
 	}
 
-	if !isExists {
+	if !bucketExists {
 		return nil
 	}
 
@@ -196,20 +201,123 @@ func FormatARN(partition, location string) string {
 	return fmt.Sprintf("arn:%s:s3:::%s", partition, location)
 }
 
-// Check whether the bucket exists before proceeding with empty the bucket
-func (s *S3) isBucketExists(bucket string) (bool, error) {
+// BucketTree creates an ASCII tree representing the folder structure of a bucket's objects.
+func (s *S3) BucketTree(bucket string) (string, error) {
+	outputs, err := s.listObjects(bucket, "/")
+	if err != nil || outputs == nil {
+		return "", err
+	}
+	var contents []*s3.Object
+	var prefixes []*s3.CommonPrefix
+	for _, output := range outputs {
+		contents = append(contents, output.Contents...)
+		prefixes = append(prefixes, output.CommonPrefixes...)
+	}
+	tree := treeprint.New()
+	// Add top-level files.
+	for _, object := range contents {
+		tree.AddNode(aws.StringValue(object.Key))
+	}
+	// Recursively add folders and their children.
+	if err := s.addNodes(tree, prefixes, bucket); err != nil {
+		return "", err
+	}
+	return tree.String(), nil
+}
+
+// BucketSizeAndCount returns the total size and number of objects in an S3 bucket.
+func (s *S3) BucketSizeAndCount(bucket string) (string, int, error) {
+	outputs, err := s.listObjects(bucket, "")
+	if err != nil || outputs == nil {
+		return "", 0, err
+	}
+	var size int64
+	var count int
+	for _, output := range outputs {
+		for _, object := range output.Contents {
+			size += aws.Int64Value(object.Size)
+			count++
+		}
+	}
+	return humanize.Bytes(uint64(size)), count, nil
+}
+
+func (s *S3) listObjects(bucket, delimiter string) ([]s3.ListObjectsV2Output, error) {
+	exists, err := s.bucketExists(bucket)
+	if err != nil || !exists {
+		return nil, err
+	}
+	var outputs []s3.ListObjectsV2Output
+	listResp := &s3.ListObjectsV2Output{}
+	for {
+		listParams := &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucket),
+			Delimiter:         aws.String(delimiter),
+			ContinuationToken: listResp.NextContinuationToken,
+		}
+		listResp, err = s.s3Client.ListObjectsV2(listParams)
+		if err != nil {
+			return nil, fmt.Errorf("list objects for bucket %s: %w", bucket, err)
+		}
+		outputs = append(outputs, *listResp)
+		if listResp.NextContinuationToken == nil {
+			break
+		}
+	}
+	return outputs, nil
+}
+
+func (s *S3) bucketExists(bucket string) (bool, error) {
 	input := &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	}
 	_, err := s.s3Client.HeadBucket(input)
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == errCodeNotFound {
+		var aerr awserr.Error
+		if errors.As(err, &aerr) && aerr.Code() == errCodeNotFound {
 			return false, nil
 		}
 		return false, err
 	}
-
 	return true, nil
+}
+
+func (s *S3) addNodes(tree treeprint.Tree, prefixes []*s3.CommonPrefix, bucket string) error {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	listResp := &s3.ListObjectsV2Output{}
+	var err error
+	for _, prefix := range prefixes {
+		var respContents []*s3.Object
+		var respPrefixes []*s3.CommonPrefix
+		branch := tree.AddBranch(filepath.Base(aws.StringValue(prefix.Prefix)))
+		for {
+			listParams := &s3.ListObjectsV2Input{
+				Bucket:            aws.String(bucket),
+				Delimiter:         aws.String(slashDelimiter),
+				ContinuationToken: listResp.ContinuationToken,
+				Prefix:            prefix.Prefix,
+			}
+			listResp, err = s.s3Client.ListObjectsV2(listParams)
+			if err != nil {
+				return fmt.Errorf("list objects for bucket %s: %w", bucket, err)
+			}
+			respContents = append(respContents, listResp.Contents...)
+			respPrefixes = append(respPrefixes, listResp.CommonPrefixes...)
+			if listResp.NextContinuationToken == nil {
+				break
+			}
+		}
+		for _, file := range respContents {
+			fileName := filepath.Base(aws.StringValue(file.Key))
+			branch.AddNode(fileName)
+		}
+		if err := s.addNodes(branch, respPrefixes, bucket); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *S3) upload(bucket, key string, buf io.Reader) (string, error) {

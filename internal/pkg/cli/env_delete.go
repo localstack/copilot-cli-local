@@ -7,20 +7,26 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
+	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/aws-sdk-go/service/ssm"
+	"github.com/aws/copilot-cli/internal/pkg/aws/codepipeline"
 	"github.com/aws/copilot-cli/internal/pkg/aws/identity"
+	rg "github.com/aws/copilot-cli/internal/pkg/aws/resourcegroups"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi"
 	awscfn "github.com/aws/copilot-cli/internal/pkg/aws/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/aws/iam"
+	"github.com/aws/copilot-cli/internal/pkg/aws/s3"
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
+	stackdescr "github.com/aws/copilot-cli/internal/pkg/describe/stack"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
 	termprogress "github.com/aws/copilot-cli/internal/pkg/term/progress"
@@ -69,16 +75,22 @@ type deleteEnvOpts struct {
 	deleteEnvVars
 
 	// Interfaces for dependencies.
-	store    environmentStore
-	rg       resourceGetter
-	deployer environmentDeployer
-	iam      roleDeleter
-	prog     progress
-	prompt   prompter
-	sel      configSelector
+	store                  environmentStore
+	rg                     resourceGetter
+	deployer               environmentDeployer
+	envDeleterFromApp      envDeleterFromApp
+	iam                    roleDeleter
+	s3                     bucketEmptier
+	envStackDescriber      stackDescriber
+	deployedPipelineLister deployedPipelineLister
+	pipelineGetter         pipelineGetter
+	prog                   progress
+	prompt                 prompter
+	sel                    configSelector
 
 	// cached data to avoid fetching the same information multiple times.
 	envConfig *config.Environment
+	appConfig *config.Application
 
 	// initRuntimeClients is overridden in tests.
 	initRuntimeClients func(*deleteEnvOpts) error
@@ -112,7 +124,12 @@ func newDeleteEnvOpts(vars deleteEnvVars) (*deleteEnvOpts, error) {
 			}
 			o.rg = resourcegroupstaggingapi.New(sess)
 			o.iam = iam.New(sess)
+			o.s3 = s3.New(sess)
+			o.envStackDescriber = stackdescr.NewStackDescriber(stack.NameForEnv(o.appName, o.name), sess)
 			o.deployer = cloudformation.New(sess, cloudformation.WithProgressTracker(os.Stderr))
+			o.envDeleterFromApp = cloudformation.New(defaultSess, cloudformation.WithProgressTracker(os.Stderr))
+			o.pipelineGetter = codepipeline.New(defaultSess)
+			o.deployedPipelineLister = deploy.NewPipelineStore(rg.New(defaultSess))
 			return nil
 		},
 	}, nil
@@ -150,9 +167,10 @@ func (o *deleteEnvOpts) Ask() error {
 }
 
 // Execute deletes the environment from the application by:
-// 1. Deleting the cloudformation stack.
-// 2. Deleting the EnvManagerRole and CFNExecutionRole.
-// 3. Deleting the parameter from the SSM store.
+// 1. Emptying environment managed S3 buckets.
+// 2. Deleting the cloudformation stack.
+// 3. Deleting the EnvManagerRole and CFNExecutionRole.
+// 4. Deleting the parameter from the SSM store.
 // The environment is removed from the store only if other delete operations succeed.
 // Execute assumes that Validate is invoked first.
 func (o *deleteEnvOpts) Execute() error {
@@ -163,15 +181,39 @@ func (o *deleteEnvOpts) Execute() error {
 		return err
 	}
 
+	if err := o.validateNoDependencyPipelines(); err != nil {
+		return err
+	}
+
 	o.prog.Start(fmt.Sprintf(fmtRetainEnvRolesStart, o.name))
 	if err := o.ensureRolesAreRetained(); err != nil {
 		o.prog.Stop(log.Serrorf(fmtRetainEnvRolesFailed, o.name))
 		return err
 	}
 	o.prog.Stop(log.Ssuccessf(fmtRetainEnvRolesComplete, o.name))
+
+	// EmptyBuckets checks for env managed s3 buckets and makes a best-effort attempt to delete them.
+	if err := o.emptyBuckets(); err != nil {
+		// Handle empty bucket error and recommend action, don't exit program. Otherwise swallow error and move on.
+		var emptyBucketErr *errBucketEmptyingFailed
+		if errors.As(err, &emptyBucketErr) {
+			log.Errorln(emptyBucketErr.Error())
+			log.Warningln(emptyBucketErr.RecommendActions())
+		}
+	}
+
+	// DeleteStack streams the deletion events; we don't need a spinner over top of it.
 	if err := o.deleteStack(); err != nil {
 		return err
 	}
+
+	// Un-delegate DNS and optionally delete stackset instance.
+	o.prog.Start("Cleaning up app-level resources and permissions\n")
+	if err := o.cleanUpAppResources(); err != nil {
+		o.prog.Stop(log.Serrorf("Failed to remove environment resources from app %q\n", o.appName))
+		return err
+	}
+	o.prog.Stop(log.Ssuccessf("Cleaned up app-level resources for the %q environment\n", o.name))
 
 	o.prog.Start(fmt.Sprintf(fmtDeleteEnvStart, o.name, o.appName))
 	if err := o.tryDeleteRoles(); err != nil {
@@ -255,7 +297,29 @@ func (o *deleteEnvOpts) validateNoRunningServices() error {
 				svcNames = append(svcNames, *t.Value)
 			}
 		}
-		return fmt.Errorf("service '%s' still exist within the environment %s", strings.Join(svcNames, ", "), o.name)
+		return fmt.Errorf("service %q still exist within the environment %s", strings.Join(svcNames, ", "), o.name)
+	}
+	return nil
+}
+
+func (o *deleteEnvOpts) validateNoDependencyPipelines() error {
+	pipelines, err := o.deployedPipelineLister.ListDeployedPipelines(o.appName)
+	if err != nil {
+		return fmt.Errorf("list deployed pipelines: %w", err)
+	}
+	for _, pipeline := range pipelines {
+		info, err := o.pipelineGetter.GetPipeline(pipeline.ResourceName)
+		if err != nil {
+			return fmt.Errorf("get pipeline %s: %w", pipeline.ResourceName, err)
+		}
+		for _, stage := range info.Stages {
+			if strings.TrimPrefix(stage.Name, deploy.StageFullNamePrefix) == o.name {
+				return &errPipelineDependsOnEnv{
+					pipeline: pipeline.Name,
+					env:      o.name,
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -333,6 +397,78 @@ func (o *deleteEnvOpts) ensureRolesAreRetained() error {
 	return nil
 }
 
+// emptyBuckets returns nil if buckets were deleted successfully. Otherwise, returns the error.
+func (o *deleteEnvOpts) emptyBuckets() error {
+	s3buckets, err := o.rg.GetResources(&resourcegroupstaggingapi.GetResourcesInput{
+		ResourceTypeFilters: aws.StringSlice([]string{"s3:bucket"}),
+		TagFilters: []*resourcegroupstaggingapi.TagFilter{
+			{
+				Key:    aws.String(stack.StackNameTagKey),
+				Values: []*string{aws.String(stack.NameForEnv(o.appName, o.name))},
+			},
+			{
+				Key:    aws.String(stack.LogicalIDTagKey),
+				Values: aws.StringSlice(stack.EnvManagedS3BucketLogicalIds),
+			},
+			{
+				Key:    aws.String(deploy.EnvTagKey),
+				Values: []*string{aws.String(o.name)},
+			},
+			{
+				Key:    aws.String(deploy.AppTagKey),
+				Values: []*string{aws.String(o.appName)},
+			},
+		},
+	})
+
+	if err != nil {
+		return fmt.Errorf("find s3 bucket resources: %w", err)
+	}
+
+	envResources, err := o.envStackDescriber.Resources()
+	if err != nil {
+		return fmt.Errorf("find stack resources: %w", err)
+	}
+
+	var stackBucketARNs []string
+	for _, resource := range envResources {
+		if slices.Contains(stack.EnvManagedS3BucketLogicalIds, resource.LogicalID) {
+			stackBucketARNs = append(stackBucketARNs, resource.PhysicalID)
+		}
+	}
+
+	var failedBuckets []string
+	var bucketErrors []error
+	for _, resourceTagMapping := range s3buckets.ResourceTagMappingList {
+		bucketARN, err := arn.Parse(aws.StringValue(resourceTagMapping.ResourceARN))
+		if err != nil {
+			return fmt.Errorf("parse the arn %s: %w", aws.StringValue(resourceTagMapping.ResourceARN), err)
+		}
+
+		// Attempt to empty all buckets found via GetResources API call
+		if err = o.s3.EmptyBucket(bucketARN.Resource); err != nil {
+			failedBuckets = append(failedBuckets, bucketARN.Resource)
+			bucketErrors = append(bucketErrors, err)
+			continue
+		}
+
+		// Warn about hanging bucket when bucket is found via API call but is not in the env CFN stack
+		// Those found via API call but not CFN stack cannot be deleted by Copilot
+		if !slices.Contains(stackBucketARNs, bucketARN.String()) {
+			log.Warningf(`Bucket %q was emptied, but was not found in the Cloudformation stack. This resource is now dangling, and can be deleted from the S3 console.\n`, bucketARN)
+		}
+	}
+
+	if len(failedBuckets) > 0 {
+		return &errBucketEmptyingFailed{
+			failedBuckets: failedBuckets,
+			bucketErrors:  bucketErrors,
+		}
+	}
+
+	return nil
+}
+
 // deleteStack returns nil if the stack was deleted successfully. Otherwise, returns the error.
 func (o *deleteEnvOpts) deleteStack() error {
 	env, err := o.getEnvConfig()
@@ -341,6 +477,31 @@ func (o *deleteEnvOpts) deleteStack() error {
 	}
 	if err := o.deployer.DeleteEnvironment(o.appName, o.name, env.ExecutionRoleARN); err != nil {
 		return fmt.Errorf("delete environment %s stack: %w", o.name, err)
+	}
+	return nil
+}
+
+func (o *deleteEnvOpts) cleanUpAppResources() error {
+	// Get list of environments and check if there are any other environments in this account OR region.
+	envs, err := o.store.ListEnvironments(o.appName)
+	if err != nil {
+		return err
+	}
+	currentEnv, err := o.getEnvConfig()
+	if err != nil {
+		return err
+	}
+	app, err := o.getAppConfig()
+	if err != nil {
+		return err
+	}
+
+	if err := o.envDeleterFromApp.RemoveEnvFromApp(&cloudformation.RemoveEnvFromAppOpts{
+		App:          app,
+		EnvToDelete:  currentEnv,
+		Environments: envs,
+	}); err != nil {
+		return fmt.Errorf("remove environment %s from application %s: %w", currentEnv.Name, app.Name, err)
 	}
 	return nil
 }
@@ -381,6 +542,19 @@ func (o *deleteEnvOpts) getEnvConfig() (*config.Environment, error) {
 	}
 	o.envConfig = env
 	return env, nil
+}
+
+func (o *deleteEnvOpts) getAppConfig() (*config.Application, error) {
+	if o.appConfig != nil {
+		// Already fetched; return.
+		return o.appConfig, nil
+	}
+	app, err := o.store.GetApplication(o.appName)
+	if err != nil {
+		return nil, fmt.Errorf("get application %q configuration: %w", o.appName, err)
+	}
+	o.appConfig = app
+	return app, nil
 }
 
 // buildEnvDeleteCmd builds the command to delete environment(s).

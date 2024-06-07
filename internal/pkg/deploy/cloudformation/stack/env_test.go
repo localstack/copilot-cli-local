@@ -150,7 +150,6 @@ func TestEnv_Template(t *testing.T) {
 					SecurityGroupConfig: nil,
 					FlowLogs:            nil,
 				},
-				LatestVersion: deploy.LatestEnvTemplateVersion,
 				CustomResources: map[string]template.S3ObjectLocation{
 					"CertificateValidationFunction": {
 						Bucket: "mockbucket",
@@ -215,6 +214,10 @@ func TestEnv_Template(t *testing.T) {
 				"CustomDomainFunction": {
 					Bucket: "mockbucket",
 					Key:    "manual/scripts/custom-resources/customdomainfunction/8932747ba5dbff619d89b92d0033ef1d04f7dd1b055e073254907d4e38e3976d.zip",
+				},
+				"BucketCleanerFunction": {
+					Bucket: "mockbucket",
+					Key:    "manual/scripts/custom-resources/bucketcleanerfunction/8932747ba5dbff619d89b92d0033ef1d04f7dd1b055e073254907d4e38e3976d.zip",
 				},
 			}, data.CustomResources)
 			return &template.Content{Buffer: bytes.NewBufferString("mockTemplate")}, nil
@@ -1275,8 +1278,8 @@ func mockDeployEnvironmentInput() *EnvConfig {
 				Type: aws.String("Environment"),
 			},
 		},
-		RawMft: []byte(`name: env
+		RawMft: `name: env
 type: Environment
-`),
+`,
 	}
 }

@@ -12,12 +12,11 @@ import (
 	"text/tabwriter"
 
 	"github.com/aws/copilot-cli/internal/pkg/template"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"gopkg.in/yaml.v3"
 
-	"github.com/aws/copilot-cli/internal/pkg/aws/ec2"
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
 	"github.com/aws/copilot-cli/internal/pkg/config"
-	"github.com/aws/copilot-cli/internal/pkg/deploy"
 	cfnstack "github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/describe/stack"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
@@ -27,10 +26,6 @@ import (
 var (
 	fmtLegacySvcDiscoveryEndpoint = "%s.local"
 )
-
-type vpcSubnetLister interface {
-	ListVPCSubnets(vpcID string) (*ec2.VPCSubnets, error)
-}
 
 // EnvDescription contains the information about an environment.
 type EnvDescription struct {
@@ -55,10 +50,9 @@ type EnvDescriber struct {
 	env             *config.Environment
 	enableResources bool
 
-	configStore  ConfigStoreSvc
-	deployStore  DeployedEnvServicesLister
-	cfn          stackDescriber
-	subnetLister vpcSubnetLister
+	configStore ConfigStoreSvc
+	deployStore DeployedEnvServicesLister
+	cfn         stackDescriber
 
 	// Cached values for reuse.
 	description *EnvDescription
@@ -88,10 +82,9 @@ func NewEnvDescriber(opt NewEnvDescriberConfig) (*EnvDescriber, error) {
 		env:             env,
 		enableResources: opt.EnableResources,
 
-		configStore:  opt.ConfigStore,
-		deployStore:  opt.DeployStore,
-		cfn:          stack.NewStackDescriber(cfnstack.NameForEnv(opt.App, opt.Env), sess),
-		subnetLister: ec2.New(sess),
+		configStore: opt.ConfigStore,
+		deployStore: opt.DeployStore,
+		cfn:         stack.NewStackDescriber(cfnstack.NameForEnv(opt.App, opt.Env), sess),
 	}, nil
 }
 
@@ -148,7 +141,9 @@ func (d *EnvDescriber) Manifest() ([]byte, error) {
 	}
 
 	if metadata.Manifest != "" {
-		return []byte(strings.TrimSpace(metadata.Manifest)), nil
+		// replace `\\n` with '\n'
+		m := strings.TrimSpace(strings.ReplaceAll(metadata.Manifest, "\\n", "\n"))
+		return []byte(m), nil
 	}
 	// Otherwise, the Manifest wasn't written into the CloudFormation template, we'll convert the config in SSM.
 	mft := manifest.FromEnvConfig(d.env, template.New())
@@ -195,23 +190,9 @@ func (d *EnvDescriber) AvailableFeatures() ([]string, error) {
 // Version returns the CloudFormation template version associated with
 // the environment by reading the Metadata.Version field from the template.
 //
-// If the Version field does not exist, then it's a legacy template and it returns an deploy.LegacyEnvTemplateVersion and nil error.
+// If the Version field does not exist, then it's a legacy template and it returns an version.LegacyEnvTemplate and nil error.
 func (d *EnvDescriber) Version() (string, error) {
-	raw, err := d.cfn.StackMetadata()
-	if err != nil {
-		return "", err
-	}
-
-	metadata := struct {
-		Version string `yaml:"Version"`
-	}{}
-	if err := yaml.Unmarshal([]byte(raw), &metadata); err != nil {
-		return "", fmt.Errorf("unmarshal Metadata property to read Version: %w", err)
-	}
-	if metadata.Version == "" {
-		return deploy.LegacyEnvTemplateVersion, nil
-	}
-	return metadata.Version, nil
+	return stackVersion(d.cfn, version.LegacyEnvTemplate)
 }
 
 // ServiceDiscoveryEndpoint returns the endpoint the environment was initialized with, if any. Otherwise,
@@ -234,24 +215,6 @@ func (d *EnvDescriber) ServiceDiscoveryEndpoint() (string, error) {
 	}
 	// If the param does not exist, the environment is legacy, has not been upgraded, and uses `app.local`.
 	return fmt.Sprintf(fmtLegacySvcDiscoveryEndpoint, d.app), nil
-}
-
-// PublicCIDRBlocks returns the public CIDR blocks of the public subnets in the environment VPC.
-func (d *EnvDescriber) PublicCIDRBlocks() ([]string, error) {
-	_, envVPC, err := d.loadStackInfo()
-	if err != nil {
-		return nil, err
-	}
-	vpcID := envVPC.ID
-	subnets, err := d.subnetLister.ListVPCSubnets(vpcID)
-	if err != nil {
-		return nil, fmt.Errorf("list subnets of vpc %s in environment %s: %w", vpcID, d.env.Name, err)
-	}
-	var cidrBlocks []string
-	for _, subnet := range subnets.Public {
-		cidrBlocks = append(cidrBlocks, subnet.CIDRBlock)
-	}
-	return cidrBlocks, nil
 }
 
 func (d *EnvDescriber) loadStackInfo() (map[string]string, EnvironmentVPC, error) {

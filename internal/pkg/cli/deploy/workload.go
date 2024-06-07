@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -82,6 +83,7 @@ func (noopActionRecommender) RecommendedActions() []string {
 type repositoryService interface {
 	Login() (string, error)
 	BuildAndPush(ctx context.Context, args *dockerengine.BuildArguments, w io.Writer) (string, error)
+	Build(ctx context.Context, args *dockerengine.BuildArguments, w io.Writer) (string, error)
 }
 
 type templater interface {
@@ -104,7 +106,7 @@ type endpointGetter interface {
 }
 
 type serviceDeployer interface {
-	DeployService(conf cloudformation.StackConfiguration, bucketName string, opts ...awscloudformation.StackOption) error
+	DeployService(conf cloudformation.StackConfiguration, bucketName string, detach bool, opts ...awscloudformation.StackOption) error
 }
 
 type deployedTemplateGetter interface {
@@ -116,9 +118,14 @@ type spinner interface {
 	Stop(label string)
 }
 
-type labeledTermPrinter interface {
+// LabeledTermPrinter is an interface for printing and managing labeled log outputs.
+type LabeledTermPrinter interface {
 	IsDone() bool
 	Print()
+}
+
+type dockerEngineRunChecker interface {
+	CheckDockerEngineRunning() error
 }
 
 // StackRuntimeConfiguration contains runtime configuration for a workload CloudFormation stack.
@@ -130,6 +137,7 @@ type StackRuntimeConfiguration struct {
 	Tags                      map[string]string
 	CustomResourceURLs        map[string]string
 	StaticSiteAssetMappingURL string
+	Version                   string
 }
 
 // DeployWorkloadInput is the input of DeployWorkload.
@@ -142,6 +150,7 @@ type DeployWorkloadInput struct {
 type Options struct {
 	ForceNewUpdate  bool
 	DisableRollback bool
+	Detach          bool
 }
 
 // GenerateCloudFormationTemplateInput is the input of GenerateCloudFormationTemplate.
@@ -155,6 +164,11 @@ type GenerateCloudFormationTemplateOutput struct {
 	Parameters string
 }
 
+// RepoName returns the name of a Copilot-managed ECR repository given an application and workload.
+func RepoName(app, workload string) string {
+	return fmt.Sprintf("%s/%s", app, workload)
+}
+
 type workloadDeployer struct {
 	name          string
 	app           *config.Application
@@ -162,7 +176,7 @@ type workloadDeployer struct {
 	image         ContainerImageIdentifier
 	resources     *stack.AppRegionalResources
 	mft           interface{}
-	rawMft        []byte
+	rawMft        string
 	workspacePath string
 
 	// Dependencies.
@@ -177,8 +191,9 @@ type workloadDeployer struct {
 	templateFS         template.Reader
 	envVersionGetter   versionGetter
 	overrider          Overrider
+	docker             dockerEngineRunChecker
 	customResources    customResourcesFunc
-	labeledTermPrinter func(fw syncbuffer.FileWriter, bufs []*syncbuffer.LabeledSyncBuffer, opts ...syncbuffer.LabeledTermPrinterOption) labeledTermPrinter
+	labeledTermPrinter func(fw syncbuffer.FileWriter, bufs []*syncbuffer.LabeledSyncBuffer, opts ...syncbuffer.LabeledTermPrinterOption) LabeledTermPrinter
 
 	// Cached variables.
 	defaultSess              *session.Session
@@ -186,6 +201,12 @@ type workloadDeployer struct {
 	envSess                  *session.Session
 	store                    *config.Store
 	envConfig                *manifest.Environment
+}
+
+// ImagePerContainer contains the contains name and its ImageURI
+type ImagePerContainer struct {
+	ContainerName string
+	ImageURI      string
 }
 
 // WorkloadDeployerInput is the input to for workloadDeployer constructor.
@@ -196,7 +217,7 @@ type WorkloadDeployerInput struct {
 	Env              *config.Environment
 	Image            ContainerImageIdentifier
 	Mft              interface{} // Interpolated, applied, and unmarshaled manifest.
-	RawMft           []byte      // Content of the manifest file without any transformations.
+	RawMft           string      // With env var interpolation only.
 	EnvVersionGetter versionGetter
 	Overrider        Overrider
 
@@ -209,6 +230,22 @@ type ContainerImageIdentifier struct {
 	Digest            string
 	CustomTag         string
 	GitShortCommitTag string
+	RepoTags          []string
+}
+
+// ImageActionInput represent the input parameters for building and uploading container images.
+type ImageActionInput struct {
+	Name              string
+	WorkspacePath     string
+	Image             ContainerImageIdentifier
+	Builder           repositoryService
+	CustomTag         string
+	GitShortCommitTag string
+	Mft               interface{}
+
+	Login              func() (string, error)
+	CheckDockerEngine  func() error
+	LabeledTermPrinter func(fw syncbuffer.FileWriter, bufs []*syncbuffer.LabeledSyncBuffer, opts ...syncbuffer.LabeledTermPrinterOption) LabeledTermPrinter
 }
 
 // newWorkloadDeployer is the constructor for workloadDeployer.
@@ -244,7 +281,7 @@ func newWorkloadDeployer(in *WorkloadDeployerInput) (*workloadDeployer, error) {
 		addons = nil // so that we can check for no addons with nil comparison
 	}
 
-	repoName := fmt.Sprintf("%s/%s", in.App.Name, in.Name)
+	repoName := RepoName(in.App.Name, in.Name)
 	repository := repository.NewWithURI(
 		ecr.New(defaultSessEnvRegion), repoName, resources.RepositoryURLs[in.Name])
 	store := config.NewSSMStore(identity.New(defaultSession), ssm.New(defaultSession), aws.StringValue(defaultSession.Config.Region))
@@ -254,7 +291,7 @@ func newWorkloadDeployer(in *WorkloadDeployerInput) (*workloadDeployer, error) {
 		ConfigStore: store,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("initiate env describer: %w", err)
+		return nil, err
 	}
 
 	mft, err := envDescriber.Manifest()
@@ -268,9 +305,10 @@ func newWorkloadDeployer(in *WorkloadDeployerInput) (*workloadDeployer, error) {
 
 	cfn := cloudformation.New(envSession, cloudformation.WithProgressTracker(os.Stderr))
 
-	labeledTermPrinter := func(fw syncbuffer.FileWriter, bufs []*syncbuffer.LabeledSyncBuffer, opts ...syncbuffer.LabeledTermPrinterOption) labeledTermPrinter {
+	labeledTermPrinter := func(fw syncbuffer.FileWriter, bufs []*syncbuffer.LabeledSyncBuffer, opts ...syncbuffer.LabeledTermPrinterOption) LabeledTermPrinter {
 		return syncbuffer.NewLabeledTermPrinter(fw, bufs, opts...)
 	}
+	docker := dockerengine.New(exec.NewCmd())
 	return &workloadDeployer{
 		name:                     in.Name,
 		app:                      in.App,
@@ -289,6 +327,7 @@ func newWorkloadDeployer(in *WorkloadDeployerInput) (*workloadDeployer, error) {
 		templateFS:               template.New(),
 		envVersionGetter:         in.EnvVersionGetter,
 		overrider:                in.Overrider,
+		docker:                   docker,
 		customResources:          in.customResources,
 		defaultSess:              defaultSession,
 		defaultSessWithEnvRegion: defaultSessEnvRegion,
@@ -379,20 +418,72 @@ func (img ContainerImageIdentifier) Tag() string {
 	return img.GitShortCommitTag
 }
 
-func (d *workloadDeployer) uploadContainerImages(out *UploadArtifactsOutput) error {
-	// If it is built from local Dockerfile, build and push to the ECR repo.
-	buildArgsPerContainer, err := buildArgsPerContainer(d.name, d.workspacePath, d.image, d.mft)
+func (d *workloadDeployer) buildAndPushContainerImages(out *UploadArtifactsOutput) error {
+	return processContainerImages(&ImageActionInput{
+		Name:               d.name,
+		WorkspacePath:      d.workspacePath,
+		Image:              d.image,
+		Mft:                d.mft,
+		CustomTag:          d.image.CustomTag,
+		GitShortCommitTag:  d.image.GitShortCommitTag,
+		Login:              d.repository.Login,
+		CheckDockerEngine:  d.docker.CheckDockerEngineRunning,
+		LabeledTermPrinter: d.labeledTermPrinter,
+	}, out, d.repository.BuildAndPush)
+
+}
+
+// BuildContainerImages builds the all the images given the build arguments
+func BuildContainerImages(in *ImageActionInput, out *UploadArtifactsOutput) error {
+	return processContainerImages(in, out, in.Builder.Build)
+}
+
+func processContainerImages(in *ImageActionInput, out *UploadArtifactsOutput, buildFunc func(ctx context.Context, args *dockerengine.BuildArguments, w io.Writer) (string, error)) error {
+	//this function could either build or buildAndPush the image based on the function received
+	buildArgsPerContainer, err := buildArgsPerContainer(in.Name, in.WorkspacePath, in.Image, in.Mft)
 	if err != nil {
 		return err
 	}
 	if len(buildArgsPerContainer) == 0 {
 		return nil
 	}
-	uri, err := d.repository.Login()
+	if err := in.CheckDockerEngine(); err != nil {
+		return fmt.Errorf("check if docker engine is running: %w", err)
+	}
+	uri, err := in.Login()
 	if err != nil {
 		return fmt.Errorf("login to image repository: %w", err)
 	}
+	isMultipleContainerImages := len(buildArgsPerContainer) > 1
+	if isMultipleContainerImages {
+		return buildContainerImagesInParallel(in, uri, buildArgsPerContainer, buildFunc, out)
+	}
+	return buildSingleContainerImage(in, uri, buildArgsPerContainer, buildFunc, out)
+}
 
+func buildSingleContainerImage(in *ImageActionInput, uri string, buildArgsPerContainer map[string]*dockerengine.BuildArguments, buildFunc func(ctx context.Context, args *dockerengine.BuildArguments, w io.Writer) (string, error), out *UploadArtifactsOutput) error {
+	out.ImageDigests = make(map[string]ContainerImageIdentifier, len(buildArgsPerContainer))
+	for name, buildArgs := range buildArgsPerContainer {
+		buildArgs.URI = uri
+		digest, err := buildFunc(context.Background(), buildArgs, os.Stderr)
+		if err != nil {
+			return fmt.Errorf("build and push the image %q: %w", name, err)
+		}
+		id := ContainerImageIdentifier{
+			Digest:            digest,
+			CustomTag:         in.CustomTag,
+			GitShortCommitTag: in.GitShortCommitTag,
+		}
+		for _, tag := range buildArgs.Tags {
+			id.RepoTags = append(id.RepoTags, fmt.Sprintf("%s:%s", uri, tag))
+		}
+		sort.Strings(id.RepoTags)
+		out.ImageDigests[name] = id
+	}
+	return nil
+}
+
+func buildContainerImagesInParallel(in *ImageActionInput, uri string, buildArgsPerContainer map[string]*dockerengine.BuildArguments, buildFunc func(ctx context.Context, args *dockerengine.BuildArguments, w io.Writer) (string, error), out *UploadArtifactsOutput) error {
 	var digestsMu sync.Mutex
 	out.ImageDigests = make(map[string]ContainerImageIdentifier, len(buildArgsPerContainer))
 	var labeledBuffers []*syncbuffer.LabeledSyncBuffer
@@ -414,17 +505,23 @@ func (d *workloadDeployer) uploadContainerImages(out *UploadArtifactsOutput) err
 		pr, pw := io.Pipe()
 		g.Go(func() error {
 			defer pw.Close()
-			digest, err := d.repository.BuildAndPush(ctx, buildArgs, pw)
+			digest, err := buildFunc(ctx, buildArgs, pw)
 			if err != nil {
 				return fmt.Errorf("build and push the image %q: %w", name, err)
 			}
+
+			id := ContainerImageIdentifier{
+				Digest:            digest,
+				CustomTag:         in.CustomTag,
+				GitShortCommitTag: in.GitShortCommitTag,
+			}
+			for _, tag := range buildArgs.Tags {
+				id.RepoTags = append(id.RepoTags, fmt.Sprintf("%s:%s", uri, tag))
+			}
+			sort.Strings(id.RepoTags)
 			digestsMu.Lock()
 			defer digestsMu.Unlock()
-			out.ImageDigests[name] = ContainerImageIdentifier{
-				Digest:            digest,
-				CustomTag:         d.image.CustomTag,
-				GitShortCommitTag: d.image.GitShortCommitTag,
-			}
+			out.ImageDigests[name] = id
 			return nil
 		})
 		g.Go(func() error {
@@ -438,7 +535,7 @@ func (d *workloadDeployer) uploadContainerImages(out *UploadArtifactsOutput) err
 	if os.Getenv("CI") != "true" {
 		opts = append(opts, syncbuffer.WithNumLines(defaultNumLinesForBuildAndPush))
 	}
-	ltp := d.labeledTermPrinter(os.Stderr, labeledBuffers, opts...)
+	ltp := in.LabeledTermPrinter(os.Stderr, labeledBuffers, opts...)
 	g.Go(func() error {
 		for {
 			ltp.Print()
@@ -686,6 +783,7 @@ func (d *workloadDeployer) runtimeConfig(in *StackRuntimeConfiguration) (*stack.
 			Region:                   d.env.Region,
 			CustomResourcesURL:       in.CustomResourceURLs,
 			EnvVersion:               envVersion,
+			Version:                  in.Version,
 		}, nil
 	}
 	images := make(map[string]stack.ECRImage, len(in.ImageDigests))
@@ -715,6 +813,7 @@ func (d *workloadDeployer) runtimeConfig(in *StackRuntimeConfiguration) (*stack.
 		Region:                   d.env.Region,
 		CustomResourcesURL:       in.CustomResourceURLs,
 		EnvVersion:               envVersion,
+		Version:                  in.Version,
 	}, nil
 }
 

@@ -269,12 +269,13 @@ Outputs:
 			EnvName:      "test",
 			WorkloadName: "frontend",
 			WorkloadType: manifestinfo.LoadBalancedWebServiceType,
-			HTTPTargetContainer: template.HTTPTargetContainer{
-				Name: "frontend",
-				Port: "80",
-			},
-			ServiceConnect: &template.ServiceConnect{
-				Alias: aws.String("frontend"),
+			ServiceConnectOpts: template.ServiceConnectOpts{
+				Server: &template.ServiceConnectServer{
+					Name:  "frontend",
+					Port:  "80",
+					Alias: "frontend",
+				},
+				Client: true,
 			},
 			HealthCheck: &template.ContainerHealthCheck{
 				Command:     []string{"CMD-SHELL", "curl -f http://localhost/ || exit 1"},
@@ -319,7 +320,7 @@ Outputs:
 			ALBListener: &template.ALBListener{
 				Rules: []template.ALBListenerRule{
 					{
-						Path:            "frontend",
+						Path:            "/frontend",
 						TargetContainer: "frontend",
 						TargetPort:      "80",
 						Aliases: []string{
@@ -448,6 +449,7 @@ Outputs:
 			Path: "frontend",
 			Port: 80,
 		})
+		mft.Network.Connect.EnableServiceConnect = aws.Bool(true)
 		mft.HTTPOrBool.Main.TargetContainer = aws.String("envoy")
 		mft.Sidecars = map[string]*manifest.SidecarConfig{
 			"envoy": {
@@ -484,10 +486,13 @@ Outputs:
 
 		// THEN
 		require.NoError(t, err)
-		require.Equal(t, template.HTTPTargetContainer{
-			Port: "443",
-			Name: "envoy",
-		}, actual.HTTPTargetContainer)
+		require.Equal(t, template.ServiceConnectOpts{
+			Server: &template.ServiceConnectServer{
+				Name: "envoy",
+				Port: "443",
+			},
+			Client: true,
+		}, actual.ServiceConnectOpts)
 	})
 }
 
@@ -539,6 +544,10 @@ func TestLoadBalancedWebService_Parameters(t *testing.T) {
 		},
 		{
 			ParameterKey:   aws.String(WorkloadEnvFileARNParamKey),
+			ParameterValue: aws.String(""),
+		},
+		{
+			ParameterKey:   aws.String(WorkloadArtifactKeyARNParamKey),
 			ParameterValue: aws.String(""),
 		},
 	}
@@ -955,6 +964,7 @@ func TestLoadBalancedWebService_SerializedParameters(t *testing.T) {
   "Parameters": {
     "AddonsTemplateURL": "",
     "AppName": "phonetool",
+    "ArtifactKeyARN": "",
     "ContainerImage": "111111111111.dkr.ecr.us-west-2.amazonaws.com/phonetool/frontend:manual-bf3678c",
     "ContainerPort": "80",
     "DNSDelegated": "false",

@@ -5,11 +5,13 @@
 package ssm
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/request"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -17,8 +19,9 @@ import (
 )
 
 type api interface {
-	PutParameter(input *ssm.PutParameterInput) (*ssm.PutParameterOutput, error)
-	AddTagsToResource(input *ssm.AddTagsToResourceInput) (*ssm.AddTagsToResourceOutput, error)
+	PutParameter(*ssm.PutParameterInput) (*ssm.PutParameterOutput, error)
+	AddTagsToResource(*ssm.AddTagsToResourceInput) (*ssm.AddTagsToResourceOutput, error)
+	GetParameterWithContext(context.Context, *ssm.GetParameterInput, ...request.Option) (*ssm.GetParameterOutput, error)
 }
 
 // SSM wraps an AWS SSM client.
@@ -59,6 +62,19 @@ func (s *SSM) PutSecret(in PutSecretInput) (*PutSecretOutput, error) {
 		return s.overwriteSecret(in)
 	}
 	return nil, err
+}
+
+// GetSecretValue retrieves the value of a parameter from AWS Systems Manager Parameter Store.
+// It takes the name of the parameter as input and returns the corresponding value as a string.
+func (s *SSM) GetSecretValue(ctx context.Context, name string) (string, error) {
+	resp, err := s.client.GetParameterWithContext(ctx, &ssm.GetParameterInput{
+		Name:           aws.String(name),
+		WithDecryption: aws.Bool(true),
+	})
+	if err != nil {
+		return "", fmt.Errorf("get parameter %q from SSM: %w", name, err)
+	}
+	return aws.StringValue(resp.Parameter.Value), nil
 }
 
 func (s *SSM) createSecret(in PutSecretInput) (*PutSecretOutput, error) {

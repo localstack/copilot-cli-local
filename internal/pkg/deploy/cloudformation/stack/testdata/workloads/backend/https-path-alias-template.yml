@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: 2010-09-09
 Description: CloudFormation template that represents a backend service on Amazon ECS.
+Metadata:
+  Version: v1.29.0
 Parameters:
   AppName:
     Type: String
@@ -27,6 +29,9 @@ Parameters:
     Description: 'URL of the environment file.'
     Type: String
     Default: ""
+  ArtifactKeyARN:
+    Type: String
+    Description: 'KMS Key used for encrypting artifacts'
   LogRetention:
     Type: Number
     Default: 30
@@ -78,6 +83,8 @@ Resources:
               Value: !Sub '${EnvName}'
             - Name: COPILOT_SERVICE_NAME
               Value: !Sub '${WorkloadName}'
+            - Name: COPILOT_LB_DNS
+              Value: !GetAtt EnvControllerAction.InternalLoadBalancerDNSName
           EnvironmentFiles:
             - !If
               - HasEnvFile
@@ -133,7 +140,17 @@ Resources:
                 Action:
                   - 'kms:Decrypt'
                 Resource:
+                  - !Ref ArtifactKeyARN
+              - Sid: DecryptTaggedKMSKey
+                Effect: 'Allow'
+                Action:
+                  - 'kms:Decrypt'
+                Resource:
                   - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/copilot-application': !Sub '${AppName}'
+                    'aws:ResourceTag/copilot-environment': !Sub '${EnvName}'
         - !If
           # Optional IAM permission required by ECS task def env file
           # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/taskdef-envfiles.html#taskdef-envfiles-iam
@@ -174,21 +191,13 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: 'sts:AssumeRole'
       Policies:
-        - PolicyName: 'DenyIAMExceptTaggedRoles'
+        - PolicyName: 'DenyIAM'
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: 'Deny'
                 Action: 'iam:*'
                 Resource: '*'
-              - Effect: 'Allow'
-                Action: 'sts:AssumeRole'
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
-                Condition:
-                  StringEquals:
-                    'iam:ResourceTag/copilot-application': !Sub '${AppName}'
-                    'iam:ResourceTag/copilot-environment': !Sub '${EnvName}'
         - PolicyName: 'ExecuteCommand'
           PolicyDocument:
             Version: '2012-10-17'
@@ -240,7 +249,7 @@ Resources:
       Timeout: 600
       MemorySize: 512
       Role: !GetAtt "RulePriorityFunctionRole.Arn"
-      Runtime: nodejs16.x
+      Runtime: nodejs20.x
   RulePriorityFunctionRole:
     Metadata:
       'aws:copilot:description': "An IAM Role to describe load balancer rules for assigning a priority"
@@ -304,7 +313,7 @@ Resources:
     Type: Custom::RulePriorityFunction
     Properties:
       ServiceToken: !GetAtt RulePriorityFunction.Arn
-      RulePath: [https-path-alias-path]
+      RulePath: ["/https-path-alias-path"]
       ListenerArn: !GetAtt EnvControllerAction.InternalHTTPSListenerArn
   
   HTTPRuleWithDomainPriorityAction:
@@ -313,12 +322,12 @@ Resources:
     Type: Custom::RulePriorityFunction
     Properties:
       ServiceToken: !GetAtt RulePriorityFunction.Arn
-      RulePath: [https-path-alias-path]
+      RulePath: ["/https-path-alias-path"]
       ListenerArn: !GetAtt EnvControllerAction.InternalHTTPListenerArn
 
   HTTPListenerRuleWithDomain:
     Metadata:
-      'aws:copilot:description': 'An HTTP listener rule for path `https-path-alias-path` that redirects HTTP to HTTPS'
+      'aws:copilot:description': 'An HTTP listener rule for path `/https-path-alias-path` that redirects HTTP to HTTPS'
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       Actions:
@@ -343,7 +352,7 @@ Resources:
       Priority: !GetAtt HTTPRuleWithDomainPriorityAction.Priority # Same priority as HTTPS Listener
   HTTPSListenerRule:
     Metadata:
-      'aws:copilot:description': 'An HTTPS listener rule for path `https-path-alias-path` that forwards HTTPS traffic to your tasks'
+      'aws:copilot:description': 'An HTTPS listener rule for path `/https-path-alias-path` that forwards HTTPS traffic to your tasks'
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       Actions:
@@ -428,7 +437,6 @@ Resources:
     Properties:
       ServiceToken: !GetAtt EnvControllerFunction.Arn
       Workload: !Ref WorkloadName
-      Aliases: ["example.com", "foobar.com", "*.foobar.com"]
       EnvStack: !Sub '${AppName}-${EnvName}'
       Parameters: [InternalALBWorkloads]
       EnvVersion: v1.42.0
@@ -439,7 +447,7 @@ Resources:
       Timeout: 900
       MemorySize: 512
       Role: !GetAtt 'EnvControllerRole.Arn'
-      Runtime: nodejs16.x
+      Runtime: nodejs20.x
   EnvControllerRole:
     Metadata:
       'aws:copilot:description': "An IAM role to update your environment stack"

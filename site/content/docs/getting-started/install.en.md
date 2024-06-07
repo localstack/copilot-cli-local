@@ -6,6 +6,10 @@ You can install AWS Copilot through [Homebrew](https://brew.sh/) or by downloadi
 brew install aws/tap/copilot-cli
 ```
 
+??? info "Are you using Rosetta on a Mac machine with Apple silicon?"
+    If your homebrew was installed with [Rosetta](https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment), then the `brew install` will install the amd64 build. 
+    If this is not what you want, please either reinstall homebrew without Rosetta, or use the manual installation option below.
+
 ## Manually
 Copy and paste the command into your terminal.
 
@@ -41,5 +45,5 @@ Copy and paste the command into your terminal.
 !!! info
     To download a specific version, replace "latest" with the specific version. For example, to download v0.6.0 on macOS, type:
     ```
-    curl -Lo copilot https://github.com/aws/copilot-cli/releases/download/v0.6.0/copilot-darwin && chmod +x copilot && sudo mv copilot /usr/local/bin/copilot &&  copilot --help
+    curl -Lo copilot https://github.com/aws/copilot-cli/releases/download/v0.6.0/copilot-darwin && chmod +x copilot && sudo mv copilot /usr/local/bin/copilot && copilot --help
     ```

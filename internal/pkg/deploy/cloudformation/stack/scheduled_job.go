@@ -92,7 +92,8 @@ type ScheduledJobConfig struct {
 	Env                string
 	Manifest           *manifest.ScheduledJob
 	ArtifactBucketName string
-	RawManifest        []byte
+	ArtifactKey        string
+	RawManifest        string
 	RuntimeConfig      RuntimeConfig
 	Addons             NestedStackConfigurer
 }
@@ -113,6 +114,7 @@ func NewScheduledJob(cfg ScheduledJobConfig) (*ScheduledJob, error) {
 				app:                cfg.App.Name,
 				permBound:          cfg.App.PermissionsBoundary,
 				artifactBucketName: cfg.ArtifactBucketName,
+				artifactKey:        cfg.ArtifactKey,
 				rc:                 cfg.RuntimeConfig,
 				image:              cfg.Manifest.ImageConfig.Image,
 				rawManifest:        cfg.RawManifest,
@@ -196,6 +198,7 @@ func (j *ScheduledJob) Template() (string, error) {
 		Publish:                  publishers,
 		Platform:                 convertPlatform(j.manifest.Platform),
 		EnvVersion:               j.rc.EnvVersion,
+		Version:                  j.rc.Version,
 
 		CustomResources:     crs,
 		PermissionsBoundary: j.permBound,

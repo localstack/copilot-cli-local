@@ -21,16 +21,50 @@ import (
 // DeployedAppMetadata wraps the Metadata field of a deployed
 // application StackSet.
 type DeployedAppMetadata struct {
-	Metadata AppResourcesConfig `yaml:"Metadata"`
+	Metadata AppResources `yaml:"Metadata"`
 }
 
-// AppResourcesConfig is a configuration for a deployed Application
-// StackSet.
+// AppResources is a configuration for a deployed Application StackSet.
+type AppResources struct {
+	AppResourcesConfig `yaml:",inline"`
+}
+
+// AppResourcesConfig is a configuration for a deployed Application StackSet.
 type AppResourcesConfig struct {
-	Accounts []string `yaml:"Accounts,flow"`
-	Services []string `yaml:"Services,flow"`
-	App      string   `yaml:"App"`
-	Version  int      `yaml:"Version"`
+	Accounts  []string               `yaml:"Accounts"`
+	Workloads []AppResourcesWorkload `yaml:"Workloads"`
+	App       string                 `yaml:"App"`
+	Version   int                    `yaml:"Version"`
+}
+
+// AppResourcesWorkload is a workload configuration for a deployed Application StackSet
+type AppResourcesWorkload struct {
+	Name    string `yaml:"Name"`
+	WithECR bool   `yaml:"WithECR"`
+}
+
+// UnmarshalYAML overrides the default YAML unmarshaling logic for the Image
+// struct, allowing it to perform more complex unmarshaling behavior.
+// This method implements the yaml.Unmarshaler (v3) interface.
+func (s *AppResources) UnmarshalYAML(value *yaml.Node) error {
+	if err := value.Decode(&s.AppResourcesConfig); err != nil {
+		return err
+	}
+
+	deprecated := struct {
+		Services []string `yaml:"Services"` // Deprecated since v1.2.0: Use Workloads instead of Services.
+	}{}
+	if err := value.Decode(&deprecated); err == nil {
+		// if there are services around, convert them to workloads
+		for _, svc := range deprecated.Services {
+			s.AppResourcesConfig.Workloads = append(s.AppResourcesConfig.Workloads, AppResourcesWorkload{
+				Name:    svc,
+				WithECR: true,
+			})
+		}
+	}
+
+	return nil
 }
 
 // AppStackConfig is for providing all the values to set up an
@@ -75,7 +109,7 @@ var cfTemplateFunctions = map[string]interface{}{
 func AppConfigFrom(template *string) (*AppResourcesConfig, error) {
 	resourceConfig := DeployedAppMetadata{}
 	err := yaml.Unmarshal([]byte(*template), &resourceConfig)
-	return &resourceConfig.Metadata, err
+	return &resourceConfig.Metadata.AppResourcesConfig, err
 }
 
 // NewAppStackConfig sets up a struct which can provide values to CloudFormation for
@@ -114,7 +148,9 @@ func (c *AppStackConfig) Template() (string, error) {
 func (c *AppStackConfig) ResourceTemplate(config *AppResourcesConfig) (string, error) {
 	// Sort the account IDs and Services so that the template we generate is deterministic
 	sort.Strings(config.Accounts)
-	sort.Strings(config.Services)
+	sort.SliceStable(config.Workloads, func(i, j int) bool {
+		return config.Workloads[i].Name < config.Workloads[j].Name
+	})
 
 	content, err := c.parser.Parse(appResourcesTemplatePath, struct {
 		*AppResourcesConfig

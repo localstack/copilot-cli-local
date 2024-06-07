@@ -52,7 +52,9 @@ func TestStaticSite_NewStaticSite(t *testing.T) {
 			input: testInput{
 				mft: testStaticSiteManifest,
 				env: testEnvName,
-				rc:  RuntimeConfig{},
+				rc: RuntimeConfig{
+					Region: "us-west-2",
+				},
 				app: testAppName,
 				urls: map[string]string{
 					"custom-domain-app-runner": "mockURL1",
@@ -65,6 +67,14 @@ func TestStaticSite_NewStaticSite(t *testing.T) {
 					name: aws.StringValue(testStaticSiteManifest.Name),
 					env:  testEnvName,
 					app:  testAppName,
+					rc: RuntimeConfig{
+						CustomResourcesURL: map[string]string{
+							"CertificateValidationFunction": "https://mockBucket.s3.us-west-2.amazonaws.com/manual/scripts/custom-resources/certificatevalidationfunction/8932747ba5dbff619d89b92d0033ef1d04f7dd1b055e073254907d4e38e3976d.zip",
+							"CustomDomainFunction":          "https://mockBucket.s3.us-west-2.amazonaws.com/manual/scripts/custom-resources/customdomainfunction/8932747ba5dbff619d89b92d0033ef1d04f7dd1b055e073254907d4e38e3976d.zip",
+							"TriggerStateMachineFunction":   "https://mockBucket.s3.us-west-2.amazonaws.com/manual/scripts/custom-resources/triggerstatemachinefunction/8932747ba5dbff619d89b92d0033ef1d04f7dd1b055e073254907d4e38e3976d.zip",
+						},
+						Region: "us-west-2",
+					},
 				},
 				manifest: testStaticSiteManifest,
 				appInfo: deploy.AppInformation{
@@ -90,9 +100,10 @@ func TestStaticSite_NewStaticSite(t *testing.T) {
 				App: &config.Application{
 					Name: tc.input.app,
 				},
-				Manifest:      tc.input.mft,
-				RuntimeConfig: tc.input.rc,
-				Addons:        addons,
+				Manifest:           tc.input.mft,
+				RuntimeConfig:      tc.input.rc,
+				ArtifactBucketName: "mockBucket",
+				Addons:             addons,
 			})
 
 			require.Equal(t, tc.wantedError, err)
@@ -123,6 +134,10 @@ func TestStaticSite_Template(t *testing.T) {
 					Name: aws.String("frontend"),
 				},
 			},
+			ArtifactBucketName: "mockBucket",
+			RuntimeConfig: RuntimeConfig{
+				Region: "us-west-2",
+			},
 			Addons: mockAddons{tplErr: errors.New("some error")},
 		})
 		require.NoError(t, err)
@@ -143,6 +158,10 @@ func TestStaticSite_Template(t *testing.T) {
 				Workload: manifest.Workload{
 					Name: aws.String("frontend"),
 				},
+			},
+			ArtifactBucketName: "mockBucket",
+			RuntimeConfig: RuntimeConfig{
+				Region: "us-west-2",
 			},
 			Addons: mockAddons{paramsErr: errors.New("some error")},
 		})
@@ -167,10 +186,14 @@ func TestStaticSite_Template(t *testing.T) {
       Value: hello`,
 		}
 		static, err := NewStaticSite(&StaticSiteConfig{
-			App:             &config.Application{},
-			EnvManifest:     &manifest.Environment{},
-			Manifest:        &manifest.StaticSite{},
-			Addons:          addons,
+			App:                &config.Application{},
+			EnvManifest:        &manifest.Environment{},
+			Manifest:           &manifest.StaticSite{},
+			Addons:             addons,
+			ArtifactBucketName: "mockBucket",
+			RuntimeConfig: RuntimeConfig{
+				Region: "us-west-2",
+			},
 			AssetMappingURL: "notAnS3URL",
 		})
 		require.NoError(t, err)
@@ -198,10 +221,14 @@ func TestStaticSite_Template(t *testing.T) {
       Value: hello`,
 		}
 		static, err := NewStaticSite(&StaticSiteConfig{
-			App:             &config.Application{},
-			EnvManifest:     &manifest.Environment{},
-			Manifest:        &manifest.StaticSite{},
-			Addons:          addons,
+			App:                &config.Application{},
+			EnvManifest:        &manifest.Environment{},
+			Manifest:           &manifest.StaticSite{},
+			Addons:             addons,
+			ArtifactBucketName: "mockBucket",
+			RuntimeConfig: RuntimeConfig{
+				Region: "us-west-2",
+			},
 			AssetMappingURL: "s3://bucket/path/to/file",
 		})
 		static.parser = parser
@@ -243,8 +270,8 @@ func TestStaticSite_Parameters(t *testing.T) {
 					ParameterValue: aws.String("mockURL"),
 				},
 				{
-					ParameterKey:   aws.String(StaticSiteDNSDelegatedParamKey),
-					ParameterValue: aws.String("false"),
+					ParameterKey:   aws.String(WorkloadArtifactKeyARNParamKey),
+					ParameterValue: aws.String("arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"),
 				},
 			},
 		},
@@ -268,7 +295,8 @@ func TestStaticSite_Parameters(t *testing.T) {
 						Name: aws.String(testEnvName),
 					},
 				},
-				Manifest: testManifest,
+				Manifest:    testManifest,
+				ArtifactKey: "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
 			})
 			require.NoError(t, err)
 
@@ -305,6 +333,7 @@ func TestStaticSite_SerializedParameters(t *testing.T) {
 				"owner": "copilot",
 			},
 		},
+		ArtifactKey: "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
 	})
 	params, err := c.SerializedParameters()
 	require.NoError(t, err)
@@ -312,7 +341,7 @@ func TestStaticSite_SerializedParameters(t *testing.T) {
   "Parameters": {
     "AddonsTemplateURL": "",
     "AppName": "phonetool",
-    "DNSDelegated": "false",
+    "ArtifactKeyARN": "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
     "EnvName": "test",
     "WorkloadName": "frontend"
   },

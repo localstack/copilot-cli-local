@@ -1,5 +1,7 @@
 # AWS Copilot for LocalStack
 
+> ⚠️ **Deprecation Notice:** AWS Copilot CLI will reach end-of-support on June 12, 2026. This fork will no longer be maintained after that date. Please plan to migrate your workloads to an alternative deployment tool.
+
 This is a fork of the [AWS Copilot CLI](https://github.com/aws/copilot-cli) for use with [LocalStack](https://localstack.cloud).
 
 ## Details
